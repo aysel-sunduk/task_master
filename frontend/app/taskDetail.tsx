@@ -1,71 +1,149 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  Alert,
-  ActivityIndicator,
-  Image,
-} from 'react-native';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+/**
+ * TaskMaster - Görev Detay Sayfası
+ * ==================================
+ * Bu ekran, görev detaylarını gösterir ve düzenleme yapılmasını sağlar.
+ */
+
 import { Ionicons } from '@expo/vector-icons';
+import axios from 'axios';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import React, { useEffect, useState } from 'react';
+import {
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
+import RNPickerSelect from 'react-native-picker-select';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
-import { useTaskStore, Task } from '../store/taskStore';
-import axios from 'axios';
-import { Platform } from 'react-native';
+import { useTaskStore } from '../store/taskStore';
 
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000');
+interface Category {
+  id: string;
+  name: string;
+  color: string;
+  icon: string;
+}
+
+const PRIORITIES = ['Düşük', 'Orta', 'Yüksek', 'Acil'];
+const STATUSES = ['Yapılacak', 'Devam Ediyor', 'Tamamlandı'];
+const PERCENTAGES = [0, 25, 50, 75, 100];
 
 export default function TaskDetailScreen() {
-  const router = useRouter();
-  const { taskId } = useLocalSearchParams<{ taskId: string }>();
   const { token } = useAuth();
-  const { tasks, updateTask, deleteTask, fetchTasks } = useTaskStore();
-  const [task, setTask] = useState<Task | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [deleting, setDeleting] = useState(false);
+  const router = useRouter();
+  const params = useLocalSearchParams<{ taskId: string }>();
+  const { fetchTasks, deleteTask } = useTaskStore();
 
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [categoryId, setCategoryId] = useState<string | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [tags, setTags] = useState('');
+  const [priority, setPriority] = useState('Orta');
+  const [status, setStatus] = useState('Yapılacak');
+  const [completionPercentage, setCompletionPercentage] = useState(0);
+  const [images, setImages] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Görev detaylarını yükle
   useEffect(() => {
+    if (!params.taskId || !token) return;
+    
+    const loadTask = async () => {
+      try {
+        const response = await axios.get(
+          `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/tasks/${params.taskId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        
+        const task = response.data;
+        setTitle(task.title || '');
+        setDescription(task.description || '');
+        setCategoryId(task.category_id || null);
+        setTags((task.tags || []).join(', '));
+        setPriority(task.priority || 'Orta');
+        setStatus(task.status || 'Yapılacak');
+        setCompletionPercentage(task.completion_percentage || 0);
+        setImages(task.images || []);
+      } catch (error: any) {
+        console.error('Görev yüklenirken hata:', error);
+        Alert.alert('Hata', 'Görev yüklenemedi');
+        router.back();
+      }
+    };
+
     loadTask();
-  }, [taskId, token]);
+  }, [params.taskId, token]);
 
-  const loadTask = async () => {
-    if (!taskId || !token) return;
+  // Kategorileri yükle
+  useEffect(() => {
+    if (!token) return;
+    
+    const fetchCategories = async () => {
+      try {
+        const response = await axios.get(
+          `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/categories`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        setCategories(response.data);
+      } catch (error) {
+        console.error('Kategoriler yüklenirken hata:', error);
+      }
+    };
+    
+    fetchCategories();
+  }, [token]);
 
-    // Önce store'dan kontrol et
-    const foundTask = tasks.find(t => t.id === taskId);
-    if (foundTask) {
-      setTask(foundTask);
-      setLoading(false);
+  // Görevi güncelle
+  const handleUpdateTask = async () => {
+    if (!title || !categoryId || !token || !params.taskId) {
+      Alert.alert('Hata', 'Başlık ve Kategori alanları zorunludur');
       return;
     }
 
-    // Store'da yoksa API'den çek
+    setLoading(true);
     try {
-      setLoading(true);
-      const response = await axios.get<Task>(`${API_URL}/api/tasks/${taskId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setTask(response.data);
+      await axios.put(
+        `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/tasks/${params.taskId}`,
+        {
+          title: title.trim(),
+          description: description.trim(),
+          category_id: categoryId,
+          tags: tags.split(',').map(t => t.trim()).filter(t => t),
+          priority,
+          status,
+          completion_percentage: completionPercentage,
+          images,
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      await fetchTasks(token);
+      Alert.alert('Başarılı', 'Görev güncellendi');
+      setIsEditing(false);
     } catch (error: any) {
-      console.error('Görev yüklenirken hata:', error);
-      Alert.alert('Hata', error.response?.data?.detail || 'Görev yüklenemedi');
-      router.back();
+      console.error('Görev güncellenirken hata:', error);
+      Alert.alert('Hata', error.response?.data?.detail || 'Görev güncellenemedi');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDelete = () => {
-    if (!task || !token) return;
+  // Görevi sil
+  const handleDeleteTask = async () => {
+    if (!token || !params.taskId) return;
 
     Alert.alert(
       'Görevi Sil',
-      'Bu görevi silmek istediğinize emin misiniz?',
+      `"${title || 'Bu görev'}" görevini silmek istediğinizden emin misiniz?`,
       [
         { text: 'İptal', style: 'cancel' },
         {
@@ -73,19 +151,13 @@ export default function TaskDetailScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              setDeleting(true);
-              await deleteTask(token, task.id);
+              await deleteTask(token, params.taskId);
+              Alert.alert('Başarılı', 'Görev başarıyla silindi');
+              // Görevleri yenile (sayfanın güncellenmesi için)
+              await fetchTasks(token);
               router.back();
             } catch (error: any) {
-              console.error('Görev silinirken hata:', error);
-              // 404 hatası (görev zaten silinmiş) sessizce geç
-              if (error.response?.status !== 404) {
               Alert.alert('Hata', error.response?.data?.detail || 'Görev silinemedi');
-              } else {
-                router.back();
-              }
-            } finally {
-              setDeleting(false);
             }
           },
         },
@@ -93,242 +165,191 @@ export default function TaskDetailScreen() {
     );
   };
 
-  const handleStatusChange = async (newStatus: string) => {
-    if (!task || !token) return;
+  const pickerItems = categories.map((cat) => ({
+    label: cat.name,
+    value: cat.id,
+  }));
 
-    try {
-      const updatedTask = await updateTask(token, task.id, { status: newStatus });
-      if (updatedTask) {
-        setTask(updatedTask);
-        Alert.alert('Başarılı', 'Görev durumu güncellendi');
-      }
-    } catch (error: any) {
-      console.error('Görev güncellenirken hata:', error);
-      Alert.alert('Hata', error.response?.data?.detail || 'Görev güncellenemedi');
-    }
-  };
-
-  const handleCompletionChange = async (newPercentage: number) => {
-    if (!task || !token) return;
-
-    try {
-      const updatedTask = await updateTask(token, task.id, { completion_percentage: newPercentage });
-      if (updatedTask) {
-        setTask(updatedTask);
-      }
-    } catch (error: any) {
-      console.error('Görev güncellenirken hata:', error);
-      Alert.alert('Hata', error.response?.data?.detail || 'Görev güncellenemedi');
-    }
-  };
-
-  const getPriorityColor = (priority: string) => {
-    switch (priority) {
-      case 'Acil': return '#F44336';
-      case 'Yüksek': return '#FF9800';
-      case 'Orta': return '#FFC107';
-      case 'Düşük': return '#4CAF50';
-      default: return '#808080';
-    }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'Tamamlandı': return '#4CAF50';
-      case 'Devam Ediyor': return '#2196F3';
-      case 'Yapılacak': return '#FF9800';
-      default: return '#808080';
-    }
-  };
-
-  if (loading) {
+  if (!isEditing) {
+    // Görüntüleme modu
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#6C63FF" />
-        <Text style={styles.loadingText}>Yükleniyor...</Text>
-      </View>
-    );
-  }
-
-  if (!task) {
-    return (
-      <View style={styles.errorContainer}>
-        <Ionicons name="alert-circle-outline" size={64} color="#F44336" />
-        <Text style={styles.errorText}>Görev bulunamadı</Text>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Text style={styles.backButtonText}>Geri Dön</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <TouchableOpacity 
-          onPress={() => router.back()} 
-          style={styles.backIcon}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Görev Detayı</Text>
-        <TouchableOpacity 
-          onPress={handleDelete} 
-          style={styles.deleteButton} 
-          disabled={deleting}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          {deleting ? (
-            <ActivityIndicator size="small" color="#F44336" />
-          ) : (
-            <Ionicons name="trash-outline" size={24} color="#F44336" />
-          )}
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
-        {/* Başlık */}
-        <View style={styles.section}>
-          <Text style={styles.title}>{task.title}</Text>
-          {task.description && (
-            <Text style={styles.description}>{task.description}</Text>
-          )}
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Görev Detayı</Text>
+          <View style={styles.headerActions}>
+            <TouchableOpacity onPress={() => setIsEditing(true)} style={styles.editButton}>
+              <Ionicons name="create-outline" size={24} color="#6C63FF" />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleDeleteTask} style={styles.deleteButton}>
+              <Ionicons name="trash-outline" size={24} color="#F44336" />
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* Kategori ve Öncelik */}
-        <View style={styles.section}>
-          <View style={styles.infoRow}>
-            <View style={styles.infoItem}>
-              <Ionicons name="folder-outline" size={20} color="#8E8E93" />
-              <Text style={styles.infoText}>
-                {task.category_name || task.category || 'Genel'}
+        <ScrollView style={styles.content}>
+          <View style={styles.detailCard}>
+            <Text style={styles.detailTitle}>{title || 'Başlıksız Görev'}</Text>
+            {description ? (
+              <Text style={styles.detailDescription}>{description}</Text>
+            ) : null}
+            
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Kategori:</Text>
+              <Text style={styles.detailValue}>
+                {categories.find(c => c.id === categoryId)?.name || 'Genel'}
               </Text>
             </View>
-            <View style={[styles.priorityBadge, { backgroundColor: getPriorityColor(task.priority) }]}>
-              <Text style={styles.priorityText}>{task.priority}</Text>
+
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Öncelik:</Text>
+              <Text style={styles.detailValue}>{priority}</Text>
+            </View>
+
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Durum:</Text>
+              <Text style={styles.detailValue}>{status}</Text>
+            </View>
+
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>İlerleme:</Text>
+              <Text style={styles.detailValue}>{completionPercentage}%</Text>
+            </View>
+
+            {tags ? (
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Etiketler:</Text>
+                <Text style={styles.detailValue}>{tags}</Text>
+              </View>
+            ) : null}
+
+            <View style={styles.progressBarContainer}>
+              <View style={[styles.progressBarFill, { width: `${completionPercentage}%` }]} />
             </View>
           </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // Düzenleme modu
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => setIsEditing(false)}>
+            <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Görevi Düzenle</Text>
+          <View style={{ width: 24 }} />
         </View>
 
-        {/* Durum */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Durum</Text>
-          <View style={styles.statusContainer}>
-            {['Yapılacak', 'Devam Ediyor', 'Tamamlandı'].map((status) => (
-              <TouchableOpacity
-                key={status}
-                style={[
-                  styles.statusButton,
-                  task.status === status && { backgroundColor: getStatusColor(status) },
-                ]}
-                onPress={() => handleStatusChange(status)}
-              >
-                <Text
-                  style={[
-                    styles.statusButtonText,
-                    task.status === status && styles.statusButtonTextActive,
-                  ]}
-                >
-                  {status}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <Text style={styles.label}>Başlık *</Text>
+          <TextInput
+            style={styles.textInput}
+            placeholder="Görev başlığı..."
+            placeholderTextColor="#8E8E93"
+            value={title}
+            onChangeText={setTitle}
+          />
 
-        {/* İlerleme */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>İlerleme: {task.completion_percentage}%</Text>
-          <View style={styles.progressBarContainer}>
-            <View
-              style={[
-                styles.progressBarFill,
-                { width: `${task.completion_percentage || 0}%` },
-              ]}
+          <Text style={styles.label}>Açıklama</Text>
+          <TextInput
+            style={[styles.textInput, styles.textArea]}
+            placeholder="Görev detayları..."
+            placeholderTextColor="#8E8E93"
+            value={description}
+            onChangeText={setDescription}
+            multiline
+          />
+
+          <Text style={styles.label}>Kategori *</Text>
+          <View style={styles.pickerContainer}>
+            <RNPickerSelect
+              onValueChange={(value: string) => setCategoryId(value)}
+              items={pickerItems}
+              style={pickerSelectStyles}
+              value={categoryId}
+              placeholder={{ label: 'Bir kategori seçin...', value: null }}
+              useNativeAndroidPickerStyle={false}
+              Icon={() => <Ionicons name="chevron-down" size={24} color="#8E8E93" />}
             />
           </View>
-          <View style={styles.percentageButtons}>
-            {[0, 25, 50, 75, 100].map((percentage) => (
+
+          <Text style={styles.label}>Etiketler (virgülle ayırın)</Text>
+          <TextInput
+            style={styles.textInput}
+            placeholder="etiket1, etiket2..."
+            placeholderTextColor="#8E8E93"
+            value={tags}
+            onChangeText={setTags}
+          />
+
+          <Text style={styles.label}>Öncelik</Text>
+          <View style={styles.chipGroup}>
+            {PRIORITIES.map((p) => (
               <TouchableOpacity
-                key={percentage}
-                style={[
-                  styles.percentageButton,
-                  task.completion_percentage === percentage && styles.percentageButtonActive,
-                ]}
-                onPress={() => handleCompletionChange(percentage)}
+                key={p}
+                style={[styles.chip, priority === p && styles.chipActive]}
+                onPress={() => setPriority(p)}
               >
-                <Text
-                  style={[
-                    styles.percentageButtonText,
-                    task.completion_percentage === percentage && styles.percentageButtonTextActive,
-                  ]}
-                >
-                  {percentage}%
+                <Text style={[styles.chipText, priority === p && styles.chipTextActive]}>
+                  {p}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
-        </View>
 
-        {/* Etiketler */}
-        {task.tags && task.tags.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Etiketler</Text>
-            <View style={styles.tagsContainer}>
-              {task.tags.map((tag, index) => (
-                <View key={index} style={styles.tag}>
-                  <Text style={styles.tagText}>{tag}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/* Resimler */}
-        {task.images && task.images.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Resimler</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {task.images.map((image, index) => (
-                <Image key={index} source={{ uri: image }} style={styles.image} />
-              ))}
-            </ScrollView>
-          </View>
-        )}
-
-        {/* Tarih Bilgileri */}
-        <View style={styles.section}>
-          <View style={styles.dateRow}>
-            <View style={styles.dateItem}>
-              <Ionicons name="calendar-outline" size={16} color="#8E8E93" />
-              <Text style={styles.dateLabel}>Oluşturulma:</Text>
-              <Text style={styles.dateValue}>
-                {new Date(task.created_at).toLocaleDateString('tr-TR')}
-              </Text>
-            </View>
-            {task.updated_at && (
-              <View style={styles.dateItem}>
-                <Ionicons name="time-outline" size={16} color="#8E8E93" />
-                <Text style={styles.dateLabel}>Güncelleme:</Text>
-                <Text style={styles.dateValue}>
-                  {new Date(task.updated_at).toLocaleDateString('tr-TR')}
+          <Text style={styles.label}>Durum</Text>
+          <View style={styles.chipGroup}>
+            {STATUSES.map((s) => (
+              <TouchableOpacity
+                key={s}
+                style={[styles.chip, status === s && styles.chipActive]}
+                onPress={() => setStatus(s)}
+              >
+                <Text style={[styles.chipText, status === s && styles.chipTextActive]}>
+                  {s}
                 </Text>
-              </View>
-            )}
+              </TouchableOpacity>
+            ))}
           </View>
-        </View>
 
-        {/* Düzenle Butonu */}
-        <TouchableOpacity
-          style={styles.editButton}
-          onPress={() => router.push(`/createTask?taskId=${task.id}`)}
-        >
-          <Ionicons name="create-outline" size={20} color="#FFFFFF" />
-          <Text style={styles.editButtonText}>Düzenle</Text>
-        </TouchableOpacity>
-      </ScrollView>
-    </SafeAreaView>
+          <Text style={styles.label}>İlerleme: {completionPercentage}%</Text>
+          <View style={styles.chipGroup}>
+            {PERCENTAGES.map((p) => (
+              <TouchableOpacity
+                key={p}
+                style={[
+                  styles.chip,
+                  completionPercentage === p && styles.chipActive,
+                  { minWidth: 60, justifyContent: 'center' },
+                ]}
+                onPress={() => setCompletionPercentage(p)}
+              >
+                <Text style={[styles.chipText, completionPercentage === p && styles.chipTextActive]}>
+                  {p}%
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <TouchableOpacity
+            style={[styles.saveButton, loading && styles.buttonDisabled]}
+            onPress={handleUpdateTask}
+            disabled={loading}
+          >
+            <Text style={styles.saveButtonText}>{loading ? 'Kaydediliyor...' : 'Kaydet'}</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -337,228 +358,175 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0F0F1E',
   },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#0F0F1E',
-  },
-  loadingText: {
-    marginTop: 16,
-    color: '#FFFFFF',
-    fontSize: 16,
-  },
-  errorContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#0F0F1E',
-    padding: 24,
-  },
-  errorText: {
-    marginTop: 16,
-    color: '#FFFFFF',
-    fontSize: 18,
-    textAlign: 'center',
-  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#2C2C3E',
-  },
-  backIcon: {
-    padding: 8,
   },
   headerTitle: {
     fontSize: 20,
     fontWeight: 'bold',
     color: '#FFFFFF',
   },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  editButton: {
+    padding: 4,
+  },
   deleteButton: {
-    padding: 8,
+    padding: 4,
   },
   content: {
     flex: 1,
-  },
-  contentContainer: {
     padding: 24,
-    paddingBottom: 40,
   },
-  section: {
-    marginBottom: 24,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  description: {
-    fontSize: 16,
-    color: '#AEAEB2',
-    lineHeight: 24,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  infoItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  infoText: {
-    fontSize: 16,
-    color: '#FFFFFF',
-  },
-  priorityBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  priorityText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#FFFFFF',
-    marginBottom: 12,
-  },
-  statusContainer: {
-    flexDirection: 'row',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  statusButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
+  detailCard: {
     backgroundColor: '#1C1C2E',
+    borderRadius: 16,
+    padding: 20,
     borderWidth: 1,
     borderColor: '#2C2C3E',
   },
-  statusButtonText: {
-    color: '#8E8E93',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  statusButtonTextActive: {
+  detailTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
     color: '#FFFFFF',
+    marginBottom: 12,
+  },
+  detailDescription: {
+    fontSize: 16,
+    color: '#AEAEB2',
+    marginBottom: 16,
+    lineHeight: 22,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  detailLabel: {
+    fontSize: 14,
+    color: '#8E8E93',
+  },
+  detailValue: {
+    fontSize: 14,
+    color: '#FFFFFF',
+    fontWeight: '600',
   },
   progressBarContainer: {
     height: 8,
     backgroundColor: '#2C2C3E',
     borderRadius: 4,
     overflow: 'hidden',
-    marginBottom: 12,
+    marginTop: 16,
   },
   progressBarFill: {
     height: '100%',
     backgroundColor: '#6C63FF',
   },
-  percentageButtons: {
-    flexDirection: 'row',
-    gap: 8,
-    flexWrap: 'wrap',
+  scrollContent: {
+    padding: 24,
+    paddingBottom: 60,
   },
-  percentageButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
+  label: {
+    fontSize: 16,
+    color: '#AEAEB2',
+    marginBottom: 8,
+    marginTop: 16,
+  },
+  textInput: {
     backgroundColor: '#1C1C2E',
+    color: '#FFFFFF',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    height: 56,
+    fontSize: 16,
     borderWidth: 1,
     borderColor: '#2C2C3E',
   },
-  percentageButtonActive: {
+  textArea: {
+    height: 100,
+    textAlignVertical: 'top',
+    paddingTop: 16,
+  },
+  pickerContainer: {
+    backgroundColor: '#1C1C2E',
+    borderRadius: 12,
+    height: 56,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#2C2C3E',
+  },
+  chipGroup: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  chip: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: '#1C1C2E',
+    borderWidth: 1,
+    borderColor: '#2C2C3E',
+    alignItems: 'center',
+  },
+  chipActive: {
     backgroundColor: '#6C63FF',
     borderColor: '#6C63FF',
   },
-  percentageButtonText: {
+  chipText: {
     color: '#8E8E93',
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: '600',
   },
-  percentageButtonTextActive: {
+  chipTextActive: {
     color: '#FFFFFF',
   },
-  tagsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  tag: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+  saveButton: {
+    backgroundColor: '#6C63FF',
     borderRadius: 12,
-    backgroundColor: '#1C1C2E',
-    borderWidth: 1,
-    borderColor: '#2C2C3E',
-  },
-  tagText: {
-    color: '#AEAEB2',
-    fontSize: 12,
-  },
-  image: {
-    width: 200,
-    height: 200,
-    borderRadius: 12,
-    marginRight: 12,
-  },
-  dateRow: {
-    gap: 12,
-  },
-  dateItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  dateLabel: {
-    fontSize: 14,
-    color: '#8E8E93',
-    marginLeft: 4,
-  },
-  dateValue: {
-    fontSize: 14,
-    color: '#FFFFFF',
-    fontWeight: '500',
-  },
-  editButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    height: 56,
     justifyContent: 'center',
-    backgroundColor: '#6C63FF',
-    paddingVertical: 16,
-    borderRadius: 12,
-    gap: 8,
-    marginTop: 8,
+    alignItems: 'center',
+    marginTop: 32,
   },
-  editButtonText: {
+  buttonDisabled: {
+    opacity: 0.6,
+  },
+  saveButtonText: {
     color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  backButton: {
-    marginTop: 24,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    backgroundColor: '#6C63FF',
-    borderRadius: 12,
-  },
-  backButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '600',
   },
 });
 
-
-
+const pickerSelectStyles = StyleSheet.create({
+  inputIOS: {
+    fontSize: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    color: 'white',
+    height: 56,
+  },
+  inputAndroid: {
+    fontSize: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    color: 'white',
+    height: 56,
+  },
+  iconContainer: {
+    top: 16,
+    right: 16,
+  },
+  placeholder: {
+    color: '#8E8E93',
+  },
+});

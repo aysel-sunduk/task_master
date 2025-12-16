@@ -1,210 +1,320 @@
-import os
-import uuid
-import bcrypt
-import jwt
-import logging
-import json
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import List, Optional, Any
-from contextlib import asynccontextmanager
+"""
+TaskMaster Backend API Server
+==============================
+Bu dosya, TaskMaster uygulamasının backend API sunucusunu içerir.
+FastAPI framework'ü kullanılarak RESTful API servisleri sağlanmaktadır.
 
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field, ValidationError, ConfigDict
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from starlette.middleware.cors import CORSMiddleware
+Ana Özellikler:
+- Kullanıcı kimlik doğrulama (JWT tabanlı)
+- Görev yönetimi (CRUD işlemleri)
+- Kategori yönetimi
+- PostgreSQL veritabanı entegrasyonu
+- Güvenlik önlemleri (bcrypt, JWT, CORS)
+"""
 
-# --- Logging Yapılandırması ---
+# ========== KÜTÜPHANE İMPORTLARI ==========
+# Standart Python kütüphaneleri
+import os  # Ortam değişkenleri için
+import uuid  # Benzersiz ID'ler oluşturmak için
+import bcrypt  # Şifre hashleme için
+import jwt  # JWT token oluşturma ve doğrulama için
+import logging  # Loglama işlemleri için
+import json  # JSON veri işleme için
+import requests  # HTTP istekleri için (OpenRouter API)
+from pathlib import Path  # Dosya yolu işlemleri için
+from datetime import datetime, timezone  # Tarih/saat işlemleri için
+from typing import List, Optional, Any  # Tip tanımlamaları için
+from contextlib import asynccontextmanager  # Uygulama yaşam döngüsü yönetimi için
+
+# Veritabanı kütüphaneleri
+import psycopg2  # PostgreSQL bağlantısı için
+from psycopg2 import pool  # Veritabanı bağlantı havuzu için
+from psycopg2.extras import RealDictCursor  # Sözlük formatında sonuçlar için
+
+# Üçüncü parti kütüphaneler
+from dotenv import load_dotenv  # .env dosyasından ortam değişkenlerini yüklemek için
+from pydantic import BaseModel, Field, ValidationError, ConfigDict  # Veri doğrulama için
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status  # FastAPI framework
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials  # JWT güvenlik için
+from starlette.middleware.cors import CORSMiddleware  # CORS yapılandırması için
+
+# ========== LOGGING YAPILANDIRMASI ==========
+# Uygulama genelinde loglama sistemini yapılandırıyoruz
+# Log formatı: Seviye:İsim:Tarih:Mesaj
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(asctime)s:%(message)s')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)  # Bu modül için logger oluşturuluyor
 
-# --- Ortam Değişkenleri ---
-ROOT_DIR = Path(__file__).parent
-dotenv_path = ROOT_DIR / '.env'
+# ========== ORTAM DEĞİŞKENLERİ YÜKLEME ==========
+# .env dosyasından ortam değişkenlerini yüklüyoruz
+ROOT_DIR = Path(__file__).parent  # Backend klasörünün yolu
+dotenv_path = ROOT_DIR / '.env'  # .env dosyasının tam yolu
 logger.info(f".env dosyası aranıyor: {dotenv_path}")
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv(dotenv_path=dotenv_path)  # .env dosyasını yükle
 logger.info(".env dosyası yüklendi (varsa).")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-JWT_SECRET = os.getenv("JWT_SECRET")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+# Ortam değişkenlerini okuyoruz
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL bağlantı URL'si
+JWT_SECRET = os.getenv("JWT_SECRET")  # JWT token imzalama için gizli anahtar
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")  # JWT algoritması (varsayılan: HS256)
 
-# Başlangıç Kontrolleri
+# ========== BAŞLANGIÇ KONTROLLERİ ==========
+# Kritik ortam değişkenlerinin varlığını kontrol ediyoruz
+# Eğer eksikse uygulama başlamadan hata veriyor
+
+# Veritabanı URL kontrolü
 if not DATABASE_URL:
     logger.critical("DATABASE_URL ortam değişkeni bulunamadı! Lütfen .env dosyasını kontrol edin.")
     raise ValueError("DATABASE_URL ortam değişkeni ayarlanmalı.")
 else:
+    # Güvenlik için şifre kısmını maskeleyerek logluyoruz
     masked_db_url = DATABASE_URL.split('@')[0].rsplit(':', 1)[0] + "@" + DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else DATABASE_URL
     logger.info(f"DATABASE_URL yüklendi: {masked_db_url}")
 
+# JWT Secret kontrolü (güvenlik için kritik)
 if not JWT_SECRET:
     logger.critical("JWT_SECRET ortam değişkeni bulunamadı! Bu güvenlik için kritik öneme sahiptir.")
     raise ValueError("JWT_SECRET ortam değişkeni ayarlanmalı.")
 else:
+    # Güvenlik için sadece son 4 karakteri gösteriyoruz
     logger.info(f"JWT_SECRET yüklendi: {'*' * (len(JWT_SECRET) - 4)}{JWT_SECRET[-4:]}")
 logger.info(f"JWT_ALGORITHM kullanılıyor: {JWT_ALGORITHM}")
 
-# --- Veritabanı Bağlantı Havuzu ---
-connection_pool = None
+# ========== VERİTABANI BAĞLANTI HAVUZU ==========
+# PostgreSQL bağlantı havuzu - performans için birden fazla bağlantı yönetir
+connection_pool = None  # Başlangıçta None, lifespan_manager'da oluşturulacak
 
-# --- Uygulama Lifespan Yönetimi ---
+# ========== UYGULAMA YAŞAM DÖNGÜSÜ YÖNETİMİ ==========
+# FastAPI uygulamasının başlangıç ve kapanış işlemlerini yönetir
 @asynccontextmanager
 async def lifespan_manager(app: FastAPI):
-    # Uygulama başlarken çalışacak kısım (yield öncesi)
+    """
+    Uygulama başlarken ve kapanırken çalışacak işlemleri yönetir.
+    - Başlangıç: Veritabanı bağlantı havuzunu oluşturur ve test eder
+    - Kapanış: Bağlantı havuzunu kapatır
+    """
+    # ========== UYGULAMA BAŞLANGIÇ İŞLEMLERİ ==========
     logger.info("FastAPI uygulama yaşam döngüsü başlatılıyor...")
 
-    # Bağlantı havuzunu başlat
+    # Veritabanı bağlantı havuzunu başlat
     global connection_pool
     try:
         logger.info("PostgreSQL bağlantı havuzu oluşturuluyor...")
+        # SimpleConnectionPool: min=1, max=20 bağlantı
+        # Bu sayede her istek için yeni bağlantı açmak yerine havuzdan alınır (performans)
         connection_pool = pool.SimpleConnectionPool(1, 20, dsn=DATABASE_URL)
+        
         # Havuzun çalışıp çalışmadığını test et
-        conn_test = connection_pool.getconn()
+        conn_test = connection_pool.getconn()  # Havuzdan bir bağlantı al
         logger.info("Test bağlantısı alındı.")
         with conn_test.cursor() as cur:
-            cur.execute("SELECT 1")
+            cur.execute("SELECT 1")  # Basit bir test sorgusu
             logger.info("Veritabanı test sorgusu başarılı.")
-        connection_pool.putconn(conn_test)
+        connection_pool.putconn(conn_test)  # Bağlantıyı havuza geri ver
         logger.info("PostgreSQL bağlantı havuzu başarıyla oluşturuldu ve test edildi.")
     except psycopg2.Error as e:
+        # Veritabanı bağlantı hatası
         logger.critical(f"Veritabanı bağlantı havuzu oluşturulamadı veya test edilemedi: {e}", exc_info=True)
         raise RuntimeError(f"Veritabanı bağlantı havuzu hatası: {e}")
     except Exception as e:
+        # Beklenmedik hatalar
         logger.critical(f"Bağlantı havuzu kurulurken beklenmedik hata: {e}", exc_info=True)
         raise RuntimeError(f"Bağlantı havuzu kurulum hatası: {e}")
 
-    yield # Uygulama ömrü boyunca burada bekler
+    yield  # Uygulama ömrü boyunca burada bekler (tüm istekler bu süreçte işlenir)
 
-    # Uygulama kapanırken çalışacak kısım (yield sonrası)
+    # ========== UYGULAMA KAPANIŞ İŞLEMLERİ ==========
     logger.info("FastAPI uygulama yaşam döngüsü sonlandırılıyor...")
     if connection_pool:
-        connection_pool.closeall()
+        connection_pool.closeall()  # Tüm bağlantıları kapat
         logger.info("PostgreSQL bağlantı havuzu kapatıldı.")
 
-# --- FastAPI Uygulaması ve Router ---
-app = FastAPI(title="TaskMaster API", version="1.0", lifespan=lifespan_manager)
-api_router = APIRouter(prefix="/api")
-security = HTTPBearer()
-
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# ========== FASTAPI UYGULAMASI VE ROUTER YAPILANDIRMASI ==========
+# Ana FastAPI uygulamasını oluşturuyoruz
+app = FastAPI(
+    title="TaskMaster API",  # API başlığı (Swagger UI'da görünür)
+    version="1.0",  # API versiyonu
+    lifespan=lifespan_manager  # Yaşam döngüsü yöneticisi
 )
 
-# ========== Pydantic Modelleri ==========
+# API router'ı oluşturuyoruz - tüm endpoint'ler /api prefix'i ile başlayacak
+api_router = APIRouter(prefix="/api")
+
+# JWT token doğrulama için HTTPBearer kullanıyoruz
+# Authorization: Bearer <token> formatında token bekler
+security = HTTPBearer()
+
+# ========== CORS (Cross-Origin Resource Sharing) YAPILANDIRMASI ==========
+# Mobil uygulama farklı bir origin'den (localhost:19006) backend'e (localhost:8000) istek yapar
+# CORS middleware bu isteklere izin verir
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Tüm origin'lere izin ver (production'da spesifik olmalı)
+    allow_credentials=True,  # Cookie ve Authorization header'larına izin ver
+    allow_methods=["*"],  # Tüm HTTP metodlarına izin ver (GET, POST, PUT, DELETE)
+    allow_headers=["*"],  # Tüm header'lara izin ver
+)
+
+# ========== PYDANTIC VERİ MODELLERİ ==========
+# Pydantic modelleri, API istek/yanıt verilerini doğrular ve serialize eder
+# Bu sayede tip güvenliği ve veri doğrulama otomatik olarak yapılır
+
+# ========== KULLANICI İŞLEMLERİ MODELLERİ ==========
 
 class UserRegister(BaseModel):
-    username: str
-    password: str
-    email: Optional[str] = None
+    """Kullanıcı kayıt isteği için model"""
+    username: str  # Kullanıcı adı (zorunlu)
+    password: str  # Şifre (zorunlu)
+    email: Optional[str] = None  # E-posta (opsiyonel)
 
 class UserLogin(BaseModel):
-    username: str
-    password: str
+    """Kullanıcı giriş isteği için model"""
+    username: str  # Kullanıcı adı
+    password: str  # Şifre
 
 class User(BaseModel):
-    id: str
-    username: str
-    email: Optional[str] = None
-    created_at: datetime
-    model_config = ConfigDict(from_attributes=True)
+    """Kullanıcı bilgileri için model (yanıt)"""
+    id: str  # Kullanıcı ID'si (UUID)
+    username: str  # Kullanıcı adı
+    email: Optional[str] = None  # E-posta
+    created_at: datetime  # Kayıt tarihi
+    model_config = ConfigDict(from_attributes=True)  # ORM objelerinden otomatik dönüşüm
 
 class TokenData(BaseModel):
-    token: str
-    user: User
+    """JWT token ve kullanıcı bilgilerini içeren yanıt modeli"""
+    token: str  # JWT token
+    user: User  # Kullanıcı bilgileri
+
+# ========== KATEGORİ İŞLEMLERİ MODELLERİ ==========
 
 class CategoryBase(BaseModel):
-    name: str
-    color: Optional[str] = "#808080"
-    icon: Optional[str] = None
+    """Kategori için temel model (ortak alanlar)"""
+    name: str  # Kategori adı
+    color: Optional[str] = "#808080"  # Kategori rengi (varsayılan: gri)
+    icon: Optional[str] = None  # Kategori ikonu (Ionicons ismi)
 
 class CategoryCreate(CategoryBase):
-    pass
+    """Yeni kategori oluşturma isteği için model"""
+    pass  # CategoryBase'den tüm alanları miras alır
 
 class CategoryUpdate(BaseModel):
-    name: Optional[str] = None
-    color: Optional[str] = None
-    icon: Optional[str] = None
+    """Kategori güncelleme isteği için model (tüm alanlar opsiyonel)"""
+    name: Optional[str] = None  # Güncellenecek kategori adı
+    color: Optional[str] = None  # Güncellenecek kategori rengi
+    icon: Optional[str] = None  # Güncellenecek kategori ikonu
 
 class CategoryResponse(CategoryBase):
-    id: str
-    user_id: Optional[str] = None
-    created_at: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)
+    """Kategori yanıt modeli (veritabanından dönen veri)"""
+    id: str  # Kategori ID'si (UUID)
+    user_id: Optional[str] = None  # Kategori sahibi kullanıcı ID'si
+    created_at: Optional[datetime] = None  # Oluşturulma tarihi
+    model_config = ConfigDict(from_attributes=True)  # ORM objelerinden otomatik dönüşüm
+
+# ========== GÖREV İŞLEMLERİ MODELLERİ ==========
 
 class TaskCreate(BaseModel):
-    title: str = Field(..., min_length=1)
-    description: Optional[str] = ""
-    category_id: Optional[str] = None
-    tags: List[str] = []
-    priority: str = "Orta"
-    status: str = "Yapılacak"
-    completion_percentage: int = Field(0, ge=0, le=100)
-    images: List[str] = []
-    due_date: Optional[str] = None
+    """Yeni görev oluşturma isteği için model"""
+    title: str = Field(..., min_length=1)  # Görev başlığı (zorunlu, en az 1 karakter)
+    description: Optional[str] = ""  # Görev açıklaması (opsiyonel)
+    category_id: Optional[str] = None  # Kategori ID'si (opsiyonel)
+    tags: List[str] = []  # Etiketler listesi (varsayılan: boş)
+    priority: str = "Orta"  # Öncelik seviyesi (varsayılan: Orta)
+    status: str = "Yapılacak"  # Görev durumu (varsayılan: Yapılacak)
+    completion_percentage: int = Field(0, ge=0, le=100)  # Tamamlanma yüzdesi (0-100 arası)
+    images: List[str] = []  # Resim URL'leri listesi (base64 veya URL)
+    due_date: Optional[str] = None  # Son tarih (ISO format string)
 
 class TaskUpdate(BaseModel):
-    title: Optional[str] = Field(None, min_length=1)
-    description: Optional[str] = None
-    category_id: Optional[str] = None
-    tags: Optional[List[str]] = None
-    priority: Optional[str] = None
-    status: Optional[str] = None
-    completion_percentage: Optional[int] = Field(None, ge=0, le=100)
-    images: Optional[List[str]] = None
-    due_date: Optional[str] = None
+    """Görev güncelleme isteği için model (tüm alanlar opsiyonel)"""
+    title: Optional[str] = Field(None, min_length=1)  # Güncellenecek başlık
+    description: Optional[str] = None  # Güncellenecek açıklama
+    category_id: Optional[str] = None  # Güncellenecek kategori ID'si
+    tags: Optional[List[str]] = None  # Güncellenecek etiketler
+    priority: Optional[str] = None  # Güncellenecek öncelik
+    status: Optional[str] = None  # Güncellenecek durum
+    completion_percentage: Optional[int] = Field(None, ge=0, le=100)  # Güncellenecek yüzde
+    images: Optional[List[str]] = None  # Güncellenecek resimler
+    due_date: Optional[str] = None  # Güncellenecek son tarih
 
 class TaskResponse(BaseModel):
-    id: str
-    user_id: str
-    title: str
-    description: Optional[str] = ""
-    tags: List[str] = Field(default_factory=list)
-    priority: str = "Orta"
-    status: str = "Yapılacak"
-    completion_percentage: int = 0
-    images: List[str] = Field(default_factory=list)
-    due_date: Optional[datetime] = None
-    created_at: datetime
-    updated_at: datetime
-    category_id: Optional[str] = None
-    category_name: Optional[str] = None
-    category_color: Optional[str] = None
-    category_icon: Optional[str] = None
-    model_config = ConfigDict(from_attributes=True)
+    """Görev yanıt modeli (veritabanından dönen veri + kategori bilgileri)"""
+    id: str  # Görev ID'si (UUID)
+    user_id: str  # Görev sahibi kullanıcı ID'si
+    title: str  # Görev başlığı
+    description: Optional[str] = ""  # Görev açıklaması
+    tags: List[str] = Field(default_factory=list)  # Etiketler (varsayılan: boş liste)
+    priority: str = "Orta"  # Öncelik seviyesi
+    status: str = "Yapılacak"  # Görev durumu
+    completion_percentage: int = 0  # Tamamlanma yüzdesi
+    images: List[str] = Field(default_factory=list)  # Resimler (varsayılan: boş liste)
+    due_date: Optional[datetime] = None  # Son tarih (datetime objesi)
+    created_at: datetime  # Oluşturulma tarihi
+    updated_at: datetime  # Güncellenme tarihi
+    category_id: Optional[str] = None  # Kategori ID'si
+    category_name: Optional[str] = None  # Kategori adı (JOIN ile alınır)
+    category_color: Optional[str] = None  # Kategori rengi (JOIN ile alınır)
+    category_icon: Optional[str] = None  # Kategori ikonu (JOIN ile alınır)
+    model_config = ConfigDict(from_attributes=True)  # ORM objelerinden otomatik dönüşüm
 
-# ========== Yardımcı Fonksiyonlar ==========
+# ========== YARDIMCI FONKSİYONLAR ==========
 
 def parse_json_list_field(raw_value: Any, field_name: str, item_id: str) -> List[Any]:
-    """Veritabanından gelen JSON stringi veya listeyi parse eder."""
+    """
+    Veritabanından gelen JSON stringi veya listeyi parse eder.
+    
+    PostgreSQL'de JSONB alanlar bazen string, bazen dict/liste olarak gelebilir.
+    Bu fonksiyon her iki durumu da handle eder.
+    
+    Args:
+        raw_value: Veritabanından gelen ham değer (string, list veya None)
+        field_name: Alan adı (hata mesajları için)
+        item_id: Öğe ID'si (hata mesajları için)
+    
+    Returns:
+        List[Any]: Parse edilmiş liste (hata durumunda boş liste)
+    """
+    # Eğer zaten liste ise direkt döndür
     if isinstance(raw_value, list):
         return raw_value
+    
+    # Eğer string ise JSON parse et
     if isinstance(raw_value, str):
         try:
-            parsed = json.loads(raw_value)
+            parsed = json.loads(raw_value)  # JSON string'i parse et
             if isinstance(parsed, list):
                 return parsed
             else:
                 logger.warning(f"ID {item_id}: '{field_name}' JSON list değil: {raw_value}. Boş liste döndürüldü.")
                 return []
         except json.JSONDecodeError:
+            # Geçersiz JSON formatı
             logger.warning(f"ID {item_id}: '{field_name}' geçersiz JSON formatı: {raw_value}. Boş liste döndürüldü.")
             return []
+    
+    # Beklenmedik tip durumunda
     if raw_value is not None:
         logger.warning(f"ID {item_id}: '{field_name}' beklenmedik tip ({type(raw_value)}): {raw_value}. Boş liste ayarlandı.")
         return []
+    
+    # None durumunda boş liste döndür
     return []
 
 def row_to_task_response(row: dict) -> TaskResponse:
-    """Veritabanı satırını TaskResponse Pydantic modeline dönüştürür."""
+    """
+    Veritabanı satırını TaskResponse Pydantic modeline dönüştürür.
+    
+    Veritabanından gelen ham veriyi (dict) Pydantic modeline dönüştürür.
+    JSON alanları (tags, images) parse edilir ve kategori bilgileri eklenir.
+    
+    Args:
+        row: Veritabanından gelen görev satırı (RealDictCursor ile)
+    
+    Returns:
+        TaskResponse: Pydantic modeli
+    
+    Raises:
+        ValueError: Veri dönüştürülemezse veya boş satır gelirse
+    """
+    # Boş satır kontrolü
     if not row:
         logger.error("row_to_task_response: İşlenecek boş satır.")
         raise ValueError("Veritabanından boş görev verisi geldi.")
@@ -248,46 +358,115 @@ def row_to_task_response(row: dict) -> TaskResponse:
         raise
 
 def hash_password(password: str) -> str:
-    """Şifreyi hashler."""
+    """
+    Şifreyi bcrypt algoritması ile hashler.
+    
+    Güvenlik için şifreler düz metin olarak saklanmaz.
+    bcrypt, salt ekleyerek her hash'i benzersiz yapar.
+    
+    Args:
+        password: Hashlenecek şifre (düz metin)
+    
+    Returns:
+        str: Hashlenmiş şifre (veritabanında saklanacak)
+    """
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Şifreyi hash ile doğrular."""
+    """
+    Kullanıcının girdiği şifreyi hash ile doğrular.
+    
+    Giriş sırasında kullanıcının girdiği şifre ile
+    veritabanındaki hash karşılaştırılır.
+    
+    Args:
+        password: Kullanıcının girdiği şifre (düz metin)
+        hashed: Veritabanındaki hashlenmiş şifre
+    
+    Returns:
+        bool: Şifre eşleşirse True, değilse False
+    """
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
 def create_token(user_id: str) -> str:
-    """Kullanıcı ID'si için JWT token oluşturur."""
+    """
+    Kullanıcı ID'si için JWT token oluşturur.
+    
+    JWT token, kullanıcının kimliğini doğrulamak için kullanılır.
+    Token içinde user_id ve expiration time (30 gün) bulunur.
+    
+    Args:
+        user_id: Token oluşturulacak kullanıcı ID'si
+    
+    Returns:
+        str: JWT token (Authorization header'da kullanılacak)
+    """
     user_id_str = str(user_id)
+    # Token süresi: 30 gün (86400 saniye = 1 gün)
     expire = datetime.now(timezone.utc).timestamp() + (86400 * 30)
-    payload = {"user_id": user_id_str, "exp": expire}
+    payload = {"user_id": user_id_str, "exp": expire}  # Token içeriği
     logger.debug(f"Token oluşturuluyor, payload: {payload}")
+    # JWT token'ı oluştur ve döndür
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-# --- Veritabanı Bağlantısı Dependency ---
+# ========== FASTAPI DEPENDENCY FONKSİYONLARI ==========
+# Bu fonksiyonlar endpoint'lerde Depends() ile kullanılır
+# Her istek için otomatik olarak çalışır ve kaynakları yönetir
+
 def get_db_connection():
-    """FastAPI dependency: Bağlantı havuzundan bir veritabanı bağlantısı sağlar."""
+    """
+    FastAPI dependency: Bağlantı havuzundan bir veritabanı bağlantısı sağlar.
+    
+    Her endpoint isteğinde bu fonksiyon çalışır ve bir veritabanı bağlantısı sağlar.
+    İstek bitince bağlantı otomatik olarak havuza geri verilir (yield sayesinde).
+    
+    Yields:
+        psycopg2.connection: PostgreSQL bağlantı objesi
+    
+    Raises:
+        HTTPException: Bağlantı havuzu yoksa veya bağlantı alınamazsa
+    """
+    # Bağlantı havuzu kontrolü
     if connection_pool is None:
         logger.error("Veritabanı bağlantı havuzu tanımlanmamış veya başlatılamadı.")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Veritabanı hizmeti kullanılamıyor.")
+    
     conn = None
     try:
+        # Havuzdan bir bağlantı al
         conn = connection_pool.getconn()
         logger.debug("Veritabanı bağlantısı havuzdan alındı.")
-        yield conn
+        yield conn  # Bağlantıyı endpoint'e ver, işlem bitince finally'e döner
     except psycopg2.Error as db_pool_err:
+        # Veritabanı hatası
         logger.error(f"Veritabanı havuzundan bağlantı alınırken hata: {db_pool_err}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Veritabanı bağlantısı alınamadı.")
     finally:
+        # İşlem bitince bağlantıyı havuza geri ver (kritik: kaynak sızıntısını önler)
         if conn:
             connection_pool.putconn(conn)
             logger.debug("Veritabanı bağlantısı havuza geri bırakıldı.")
 
-# --- Mevcut Kullanıcı ID'si Dependency ---
 def get_current_user_id(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     conn: Any = Depends(get_db_connection)
 ) -> str:
-    """JWT token'dan kullanıcı ID'sini çıkarır ve veritabanında varlığını kontrol eder."""
+    """
+    JWT token'dan kullanıcı ID'sini çıkarır ve veritabanında varlığını kontrol eder.
+    
+    Bu fonksiyon korumalı endpoint'lerde kullanılır.
+    Authorization header'ından JWT token'ı alır, doğrular ve kullanıcı ID'sini döndürür.
+    
+    Args:
+        credentials: HTTPAuthorizationCredentials - Authorization header'dan token
+        conn: Veritabanı bağlantısı (dependency)
+    
+    Returns:
+        str: Doğrulanmış kullanıcı ID'si
+    
+    Raises:
+        HTTPException: Token geçersizse, süresi dolmuşsa veya kullanıcı bulunamazsa
+    """
     if not JWT_SECRET:
         logger.critical("JWT_SECRET ortam değişkeni ayarlanmamış. Sunucu konfigürasyon hatası.")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Sunucu konfigürasyon hatası.")
@@ -332,10 +511,27 @@ def get_current_user_id(
         logger.error(f"Token doğrulama sırasında beklenmedik hata: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token doğrulanamadı: {str(e)}")
 
-# ========== Auth Endpointleri ==========
+# ========== KİMLİK DOĞRULAMA ENDPOINT'LERİ ==========
 
 @api_router.post("/auth/register", response_model=TokenData, status_code=status.HTTP_201_CREATED)
 def register(user_data: UserRegister, conn: Any = Depends(get_db_connection)):
+    """
+    Yeni kullanıcı kaydı endpoint'i.
+    
+    Kullanıcı adı, şifre ve opsiyonel e-posta ile yeni kullanıcı oluşturur.
+    Şifre bcrypt ile hashlenir, JWT token oluşturulur ve otomatik giriş yapılır.
+    Yeni kullanıcıya varsayılan kategoriler (Genel, İş, Kişisel) oluşturulur.
+    
+    Args:
+        user_data: UserRegister - Kayıt bilgileri
+        conn: Veritabanı bağlantısı (dependency)
+    
+    Returns:
+        TokenData: JWT token ve kullanıcı bilgileri
+    
+    Raises:
+        HTTPException: Kullanıcı adı/e-posta zaten kayıtlıysa veya veritabanı hatası varsa
+    """
     logger.info(f"Kayıt isteği alındı: {user_data.username}")
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -386,6 +582,23 @@ def register(user_data: UserRegister, conn: Any = Depends(get_db_connection)):
 
 @api_router.post("/auth/login", response_model=TokenData)
 def login(credentials: UserLogin, conn: Any = Depends(get_db_connection)):
+    """
+    Kullanıcı giriş endpoint'i.
+    
+    Kullanıcı adı ve şifre ile giriş yapar.
+    Şifre veritabanındaki hash ile karşılaştırılır.
+    Başarılı girişte JWT token oluşturulur ve döndürülür.
+    
+    Args:
+        credentials: UserLogin - Giriş bilgileri (kullanıcı adı, şifre)
+        conn: Veritabanı bağlantısı (dependency)
+    
+    Returns:
+        TokenData: JWT token ve kullanıcı bilgileri
+    
+    Raises:
+        HTTPException: Kullanıcı adı/şifre hatalıysa veya veritabanı hatası varsa
+    """
     logger.info(f"Giriş isteği alındı: {credentials.username}")
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -766,7 +979,12 @@ def get_tasks(
 def get_task(task_id: str, user_id: str = Depends(get_current_user_id), conn: Any = Depends(get_db_connection)):
     logger.info(f"Tek görev isteniyor: {task_id}, kullanıcı: {user_id}")
     try:
+        # UUID formatını doğrula ama string olarak kullan (psycopg2 adapt sorunu için)
         task_uuid = uuid.UUID(task_id)
+        user_uuid = uuid.UUID(user_id)
+        # String'e çevir - PostgreSQL otomatik cast eder
+        task_uuid_str = str(task_uuid)
+        user_uuid_str = str(user_uuid)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Geçersiz Görev ID formatı.")
 
@@ -776,9 +994,9 @@ def get_task(task_id: str, user_id: str = Depends(get_current_user_id), conn: An
                 SELECT t.*, c.name AS category_name, c.color AS category_color, c.icon AS category_icon
                 FROM tasks t
                 LEFT JOIN categories c ON t.category_id = c.id
-                WHERE t.id = %s AND t.user_id = %s
+                WHERE t.id = %s::uuid AND t.user_id = %s::uuid
             """
-            cur.execute(select_query, (task_uuid, user_id))
+            cur.execute(select_query, (task_uuid_str, user_uuid_str))
             row = cur.fetchone()
 
             if not row:
@@ -801,33 +1019,39 @@ def get_task(task_id: str, user_id: str = Depends(get_current_user_id), conn: An
 def update_task(task_id: str, task_update: TaskUpdate, user_id: str = Depends(get_current_user_id), conn: Any = Depends(get_db_connection)):
     logger.info(f"Görev güncelleniyor: {task_id}, kullanıcı: {user_id}, Güncelleme Verisi: {task_update.model_dump(exclude_unset=True)}")
     try:
+        # UUID formatını doğrula ama string olarak kullan (psycopg2 adapt sorunu için)
         task_uuid = uuid.UUID(task_id)
+        user_uuid = uuid.UUID(user_id)
+        # String'e çevir - PostgreSQL otomatik cast eder
+        task_uuid_str = str(task_uuid)
+        user_uuid_str = str(user_uuid)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Geçersiz Görev ID formatı.")
 
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Görevin kullanıcıya ait olup olmadığını kontrol et
-            cur.execute("SELECT id FROM tasks WHERE id = %s AND user_id = %s", (task_uuid, user_id))
+            cur.execute("SELECT id FROM tasks WHERE id = %s::uuid AND user_id = %s::uuid", (task_uuid_str, user_uuid_str))
             if not cur.fetchone():
                 logger.warning(f"Güncellenecek görev bulunamadı veya kullanıcıya ait değil: {task_id}, kullanıcı: {user_id}")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Görev bulunamadı veya size ait değil.")
 
             update_data = task_update.model_dump(exclude_unset=True)
 
-            cat_uuid = None
+            cat_uuid_str = None
             if "category_id" in update_data:
                 if update_data["category_id"] is not None:
                     try:
                         cat_uuid = uuid.UUID(update_data["category_id"])
-                        cur.execute("SELECT id FROM categories WHERE id = %s AND (user_id = %s OR user_id IS NULL)", (cat_uuid, user_id))
+                        cat_uuid_str = str(cat_uuid)
+                        cur.execute("SELECT id FROM categories WHERE id = %s::uuid AND (user_id = %s::uuid OR user_id IS NULL)", (cat_uuid_str, user_uuid_str))
                         if not cur.fetchone():
                             logger.warning(f"Geçersiz kategori ID'si (güncelleme): {update_data['category_id']}, kullanıcı {user_id} için bulunamadı.")
                             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Belirtilen kategori bulunamadı veya size ait değil.")
                     except ValueError:
                         logger.warning(f"Geçersiz kategori UUID formatı (güncelleme): {update_data['category_id']}")
                         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Geçersiz kategori ID formatı.")
-                update_data["category_id"] = cat_uuid
+                update_data["category_id"] = cat_uuid_str
 
             if not update_data:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Güncellenecek alan yok.")
@@ -843,8 +1067,8 @@ def update_task(task_id: str, task_update: TaskUpdate, user_id: str = Depends(ge
                 else:
                     params_list.append(value)
 
-            query = f"UPDATE tasks SET {', '.join(set_clauses)} WHERE id = %s AND user_id = %s RETURNING id"
-            params_list.extend([task_uuid, user_id])
+            query = f"UPDATE tasks SET {', '.join(set_clauses)} WHERE id = %s::uuid AND user_id = %s::uuid RETURNING id"
+            params_list.extend([task_uuid_str, user_uuid_str])
 
             cur.execute(query, tuple(params_list))
             updated_row_id = cur.fetchone()
@@ -862,9 +1086,9 @@ def update_task(task_id: str, task_update: TaskUpdate, user_id: str = Depends(ge
                 SELECT t.*, c.name AS category_name, c.color AS category_color, c.icon AS category_icon
                 FROM tasks t
                 LEFT JOIN categories c ON t.category_id = c.id
-                WHERE t.id = %s
+                WHERE t.id = %s::uuid AND t.user_id = %s::uuid
             """
-            cur.execute(select_query, (task_uuid,))
+            cur.execute(select_query, (task_uuid_str, user_uuid_str))
             updated_task_row = cur.fetchone()
 
             if not updated_task_row:
@@ -893,37 +1117,260 @@ def update_task(task_id: str, task_update: TaskUpdate, user_id: str = Depends(ge
 def delete_task(task_id: str, user_id: str = Depends(get_current_user_id), conn: Any = Depends(get_db_connection)):
     logger.info(f"Görev silme isteği: {task_id}, kullanıcı: {user_id}")
     try:
+        # UUID formatını doğrula ama string olarak kullan (psycopg2 adapt sorunu için)
         task_uuid = uuid.UUID(task_id)
+        user_uuid = uuid.UUID(user_id)
+        # String'e çevir - PostgreSQL otomatik cast eder
+        task_uuid_str = str(task_uuid)
+        user_uuid_str = str(user_uuid)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Geçersiz Görev ID formatı.")
 
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM tasks WHERE id = %s AND user_id = %s", (task_uuid, user_id))
-            conn.commit()
-
-            if cur.rowcount == 0:
+            # Önce görevin varlığını ve kullanıcıya ait olup olmadığını kontrol et
+            cur.execute("SELECT id FROM tasks WHERE id = %s::uuid AND user_id = %s::uuid", (task_uuid_str, user_uuid_str))
+            if not cur.fetchone():
                 logger.warning(f"Silinecek görev bulunamadı veya kullanıcıya ait değil: {task_id}, kullanıcı: {user_id}")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Görev bulunamadı veya size ait değil.")
-
+            
+            # Görevi sil
+            cur.execute("DELETE FROM tasks WHERE id = %s::uuid AND user_id = %s::uuid", (task_uuid_str, user_uuid_str))
+            
+            # Silme işleminin başarılı olup olmadığını kontrol et
+            if cur.rowcount == 0:
+                logger.warning(f"Görev silme işlemi başarısız (rowcount=0): {task_id}, kullanıcı: {user_id}")
+                conn.rollback()
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Görev silinemedi.")
+            
+            # İşlemi commit et
+            conn.commit()
             logger.info(f"Görev başarıyla silindi: {task_id}")
             return
 
+    except HTTPException:
+        # HTTPException'ları tekrar fırlat (rollback yapılmış olabilir)
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        raise
     except psycopg2.Error as db_err:
-        conn.rollback()
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
         logger.error(f"Veritabanı hatası (delete_task): {db_err}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Görev silinirken veritabanı hatası oluştu.")
     except Exception as e:
-        conn.rollback()
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
         logger.error(f"Beklenmedik hata (delete_task): {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Görev silinirken beklenmedik bir hata oluştu.")
 
 # ========== AI Endpointleri ==========
 
+class ChatMessage(BaseModel):
+    """AI chat mesaj modeli"""
+    message: str  # Kullanıcı mesajı
+
+class ChatResponse(BaseModel):
+    """AI chat yanıt modeli"""
+    response: str  # AI yanıtı
+
 @api_router.post("/ai/suggestions", response_model=List[str])
 def get_ai_suggestions(user_id: str = Depends(get_current_user_id)):
+    """AI önerileri endpoint'i (eski - geriye dönük uyumluluk için)"""
     logger.info(f"AI önerileri istendi: {user_id}")
     return ["Markete git", "Projeyi bitir", "E-postaları kontrol et"]
+
+@api_router.post("/ai/chat", response_model=ChatResponse)
+def ai_chat(
+    chat_message: ChatMessage,
+    user_id: str = Depends(get_current_user_id),
+    conn: Any = Depends(get_db_connection)
+):
+    """
+    AI Chatbot endpoint'i.
+    
+    Kullanıcının görevlerine hakim olan bir AI asistan ile sohbet eder.
+    OpenRouter API kullanarak ücretsiz AI modeli ile görev yönetimi konusunda yardım sağlar.
+    
+    Args:
+        chat_message: ChatMessage - Kullanıcı mesajı
+        user_id: Kullanıcı ID'si (dependency)
+        conn: Veritabanı bağlantısı (dependency)
+    
+    Returns:
+        ChatResponse: AI yanıtı
+    """
+    logger.info(f"AI chat isteği alındı: {user_id}, mesaj: {chat_message.message[:50]}...")
+    
+    try:
+        # Kullanıcının görevlerini veritabanından al
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT t.*, c.name AS category_name, c.color AS category_color, c.icon AS category_icon
+                FROM tasks t
+                LEFT JOIN categories c ON t.category_id = c.id
+                WHERE t.user_id = %s
+                ORDER BY t.created_at DESC
+                LIMIT 20
+            """, (user_id,))
+            tasks = cur.fetchall()
+        
+        # Görevleri AI için formatla
+        tasks_summary = []
+        for task in tasks:
+            tasks_summary.append({
+                "title": task.get("title", ""),
+                "description": task.get("description", ""),
+                "status": task.get("status", ""),
+                "priority": task.get("priority", ""),
+                "completion_percentage": task.get("completion_percentage", 0),
+                "category": task.get("category_name", "Genel"),
+                "tags": json.loads(task.get("tags", "[]")) if isinstance(task.get("tags"), str) else task.get("tags", [])
+            })
+        
+        # AI için sistem prompt'u hazırla (daha samimi ve akıllı)
+        system_prompt = f"""Sen TaskMaster görev yönetimi uygulamasının AI asistanısın. 
+Kullanıcının görevlerine ve detaylarına tam olarak hakimsin. Görevlerini akıllıca yönetmesinde yardımcı ol.
+
+Kullanıcının mevcut görevleri:
+{json.dumps(tasks_summary, ensure_ascii=False, indent=2)}
+
+ÖNEMLİ TALİMATLAR:
+1. Kullanıcı selamlaşırsa (merhaba, selam, iyi günler vb.), önce samimi bir şekilde selamla, sonra nasıl yardımcı olabileceğini sor.
+2. Her soruya farklı ve özel cevaplar ver. Aynı cevabı tekrarlama.
+3. Görevlerle ilgili sorulara detaylı ve akıllıca cevaplar ver.
+4. Önceliklendirme, zaman yönetimi, görev organizasyonu konularında pratik öneriler sun.
+5. Kullanıcının görevlerini analiz et ve kişiselleştirilmiş tavsiyeler ver.
+6. Samimi, dostane ve yardımsever bir ton kullan. İnsansı konuş.
+7. Her zaman Türkçe cevap ver.
+8. Kısa ve öz cevaplar ver, gereksiz uzatma.
+
+Örnek iyi cevaplar:
+- "Merhaba! Tabii ki, görevlerinizi önceliklendirmenize yardımcı olabilirim. Şu anda 3 göreviniz var..."
+- "Görevlerinize baktığımda, 'Proje sunumu' göreviniz yüksek öncelikli görünüyor..."
+- "Evet, görevlerinizi daha iyi organize edebiliriz. Hangi konuda yardıma ihtiyacınız var?"
+
+Kötü cevaplar (bunları verme):
+- Her soruya aynı istatistikleri tekrarlamak
+- Mekanik ve robot gibi cevaplar
+- "Görevlerinizi yönetmek için ana sayfadan..." gibi genel ifadeleri sürekli tekrarlamak"""
+
+        # OpenRouter API'ye istek gönder (ücretsiz model kullan)
+        # Önce ortam değişkeninden oku, yoksa .env'den tekrar yükle
+        OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+        
+        # Eğer ortam değişkeninde yoksa, .env dosyasını tekrar yükle
+        if not OPENROUTER_API_KEY:
+            logger.warning("OPENROUTER_API_KEY ortam değişkeninde bulunamadı, .env dosyası tekrar yükleniyor...")
+            dotenv_path = ROOT_DIR / '.env'
+            load_dotenv(dotenv_path=dotenv_path, override=True)  # override=True ile mevcut değerleri güncelle
+            OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+        
+        # Debug: API key kontrolü
+        logger.info(f"OPENROUTER_API_KEY kontrolü: {'Var' if OPENROUTER_API_KEY else 'YOK'}")
+        if OPENROUTER_API_KEY:
+            logger.info(f"API Key uzunluğu: {len(OPENROUTER_API_KEY)} karakter")
+            logger.info(f"API Key ilk 10 karakter: {OPENROUTER_API_KEY[:10]}...")
+        else:
+            logger.error("OPENROUTER_API_KEY bulunamadı! Lütfen backend/.env dosyasında OPENROUTER_API_KEY=your-key şeklinde tanımlayın.")
+            logger.error(f".env dosyası yolu: {ROOT_DIR / '.env'}")
+            logger.error(f".env dosyası var mı: {(ROOT_DIR / '.env').exists()}")
+        
+        if not OPENROUTER_API_KEY:
+            return ChatResponse(response="AI servisi yapılandırılmamış. Lütfen yöneticiye başvurun.")
+        
+        # ÜCRETSİZ MODELLER (OpenRouter - 2025 - :free etiketi ile doğrulanmış):
+        # 
+        # EN İYİ SEÇENEK (Türkçe görev yönetimi için):
+        # 1. google/gemma-3-4b-it:free (ÖNERİLEN - 4B parametre, ücretsiz, iyi kalite, Türkçe desteği)
+        # 2. mistralai/mistral-small-3.2-24b-instruct:free (En iyi kalite - 24B parametre, daha yavaş)
+        # 
+        # ALTERNATİFLER:
+        # 3. google/gemma-3-12b-it:free (12B parametre, çok iyi kalite, orta hız)
+        # 4. microsoft/phi-3-medium-4k-instruct (Ücretsiz, hızlı, küçük context)
+        # 
+        # Not: gemma-3-4b-it:free en dengeli seçenek (hız + kalite + ücretsiz + Türkçe)
+        # Daha iyi kalite için mistral-small-3.2-24b-instruct:free kullanılabilir (daha yavaş)
+        model = "google/gemma-3-4b-it:free"  # Ücretsiz model (önerilen - en iyi denge)
+        
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": chat_message.message}
+                ],
+                "temperature": 0.8,  # Daha yaratıcı ve doğal cevaplar için artırıldı
+                "max_tokens": 300,  # Daha kısa ve öz cevaplar için azaltıldı
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            ai_response = response.json()
+            chat_response_text = ai_response["choices"][0]["message"]["content"]
+            logger.info(f"AI yanıtı alındı: {chat_response_text[:50]}...")
+            return ChatResponse(response=chat_response_text)
+        else:
+            # Rate limit veya hata durumunda fallback
+            logger.warning(f"OpenRouter API hatası: {response.status_code}, {response.text}")
+            
+            # Basit bir fallback yanıt
+            if "rate limit" in response.text.lower() or response.status_code == 429:
+                return ChatResponse(response="Üzgünüm, AI servisi şu anda çok yoğun. Birkaç dakika sonra tekrar deneyebilir misiniz?")
+            else:
+                # Görevler hakkında akıllı fallback yanıt (kullanıcı mesajına göre)
+                total_tasks = len(tasks_summary)
+                completed = sum(1 for t in tasks_summary if t["status"] == "Tamamlandı")
+                in_progress = sum(1 for t in tasks_summary if t["status"] == "Devam Ediyor")
+                todo = sum(1 for t in tasks_summary if t["status"] == "Yapılacak")
+                
+                user_message_lower = chat_message.message.lower()
+                
+                # Kullanıcı mesajına göre farklı cevaplar
+                if any(word in user_message_lower for word in ["merhaba", "selam", "hey", "hi", "hello"]):
+                    fallback_response = f"Merhaba! TaskMaster asistanınızım. Şu anda {total_tasks} göreviniz var. {completed} görev tamamlandı, {in_progress} görev devam ediyor, {todo} görev yapılacak durumda. Görevlerinizle ilgili nasıl yardımcı olabilirim?"
+                elif any(word in user_message_lower for word in ["öncelik", "önceliklendir", "hangi", "hangisi"]):
+                    # Öncelikli görevleri bul
+                    high_priority = [t for t in tasks_summary if t.get("priority") in ["Yüksek", "Acil"]]
+                    if high_priority:
+                        task_names = ", ".join([t["title"] for t in high_priority[:3]])
+                        fallback_response = f"Öncelikli görevlerinize baktığımda: {task_names} görevleriniz yüksek öncelikli görünüyor. Bunlara öncelik vermenizi öneririm."
+                    else:
+                        fallback_response = "Şu anda yüksek öncelikli göreviniz görünmüyor. Görevlerinizi önceliklendirmek için görev detaylarından öncelik seviyesini ayarlayabilirsiniz."
+                elif any(word in user_message_lower for word in ["tamamlan", "bitir", "yapıldı"]):
+                    fallback_response = f"Harika! {completed} göreviniz tamamlanmış. {todo} görev daha yapılacak durumda. Devam eden görevlerinizi tamamlamaya odaklanabilirsiniz."
+                elif any(word in user_message_lower for word in ["yardım", "nasıl", "ne yapmalı"]):
+                    fallback_response = f"Size yardımcı olabilirim! {total_tasks} göreviniz var. Görevlerinizi önceliklendirmek, organize etmek veya yeni görevler eklemek konusunda yardımcı olabilirim. Hangi konuda destek istersiniz?"
+                else:
+                    # Genel cevap (daha samimi)
+                    if total_tasks == 0:
+                        fallback_response = "Henüz göreviniz yok. Yeni görevler ekleyerek başlayabilirsiniz. Size nasıl yardımcı olabilirim?"
+                    else:
+                        fallback_response = f"Görevlerinize baktığımda {total_tasks} göreviniz var. {completed} görev tamamlandı, {in_progress} görev devam ediyor. Görevlerinizle ilgili daha spesifik bir soru sorarsanız size daha iyi yardımcı olabilirim."
+                
+                return ChatResponse(response=fallback_response)
+                
+    except requests.exceptions.RequestException as e:
+        logger.error(f"OpenRouter API istek hatası: {e}", exc_info=True)
+        return ChatResponse(response="AI servisine bağlanılamadı. Lütfen internet bağlantınızı kontrol edin.")
+    except Exception as e:
+        logger.error(f"AI chat beklenmedik hata: {e}", exc_info=True)
+        return ChatResponse(response="Bir hata oluştu. Lütfen tekrar deneyin.")
 
 # --- Router'ı Ana Uygulamaya Dahil Etme ---
 app.include_router(api_router)

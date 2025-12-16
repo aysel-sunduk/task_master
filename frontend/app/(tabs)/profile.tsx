@@ -36,22 +36,15 @@ export default function ProfileScreen() {
     );
   };
 
-  const completedTasks = tasks.filter(t => t.status === 'Tamamlandı').length;
-  const inProgressTasks = tasks.filter(t => t.status === 'Devam Ediyor').length;
-  const todoTasks = tasks.filter(t => t.status === 'Yapılacak').length;
+  // Görev istatistiklerini hesapla (güvenli şekilde)
+  const completedTasks = tasks?.filter(t => t?.status === 'Tamamlandı')?.length || 0;
+  const inProgressTasks = tasks?.filter(t => t?.status === 'Devam Ediyor')?.length || 0;
+  const todoTasks = tasks?.filter(t => t?.status === 'Yapılacak')?.length || 0;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity 
-          onPress={() => router.back()} 
-          style={styles.backButton}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
         <Text style={styles.title}>Profil</Text>
-        <View style={styles.placeholder} />
       </View>
 
       <ScrollView style={styles.content}>
@@ -73,7 +66,7 @@ export default function ProfileScreen() {
               <View style={[styles.statIcon, { backgroundColor: '#6C63FF20' }]}>
                 <Ionicons name="list" size={24} color="#6C63FF" />
               </View>
-              <Text style={styles.statValue}>{tasks.length}</Text>
+              <Text style={styles.statValue}>{tasks?.length || 0}</Text>
               <Text style={styles.statLabel}>Toplam Görev</Text>
             </View>
 
@@ -81,7 +74,7 @@ export default function ProfileScreen() {
               <View style={[styles.statIcon, { backgroundColor: '#4CAF5020' }]}>
                 <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
               </View>
-              <Text style={styles.statValue}>{completedTasks}</Text>
+              <Text style={styles.statValue}>{completedTasks || 0}</Text>
               <Text style={styles.statLabel}>Tamamlanan</Text>
             </View>
 
@@ -89,7 +82,7 @@ export default function ProfileScreen() {
               <View style={[styles.statIcon, { backgroundColor: '#FF980020' }]}>
                 <Ionicons name="time" size={24} color="#FF9800" />
               </View>
-              <Text style={styles.statValue}>{inProgressTasks}</Text>
+              <Text style={styles.statValue}>{inProgressTasks || 0}</Text>
               <Text style={styles.statLabel}>Devam Eden</Text>
             </View>
 
@@ -97,7 +90,7 @@ export default function ProfileScreen() {
               <View style={[styles.statIcon, { backgroundColor: '#F4433620' }]}>
                 <Ionicons name="alert-circle" size={24} color="#F44336" />
               </View>
-              <Text style={styles.statValue}>{todoTasks}</Text>
+              <Text style={styles.statValue}>{todoTasks || 0}</Text>
               <Text style={styles.statLabel}>Yapılacak</Text>
             </View>
           </View>
@@ -111,7 +104,7 @@ export default function ProfileScreen() {
             style={styles.menuItem}
             onPress={() => Alert.alert(
               'Yardım ve Destek', 
-              'TaskMaster Yardım Merkezi\n\n📧 Email: sundukaysel@gmail.com\n\nSorularınız ve önerileriniz için bizimle iletişime geçebilirsiniz.'
+              'TaskMaster Yardım Merkezi\n\n📧 Email: sundukaysel@gmail.com\n\nSorularınız için bize ulaşabilirsiniz.'
             )}
           >
             <View style={styles.menuItemLeft}>
@@ -125,7 +118,7 @@ export default function ProfileScreen() {
             style={styles.menuItem}
             onPress={() => Alert.alert(
               'TaskMaster Hakkında', 
-              'TaskMaster v1.0.0\n\n🚀 AI destekli görev yönetimi uygulaması\n\n💻 Geliştirme Ortamı:\nVisual Studio Code\n\n📚 Eğitim Kaynağı:\ndevArdo - Sıfırdan React Native Dersleri\n(JavaScript + Expo)\n\n📝 Bu uygulama bir dönem projesi olarak geliştirilmiştir.\n\n💡 Görevlerinizi akıllıca yönetin!\n\n© 2025 TaskMaster'
+              'TaskMaster v1.0.0\n\n📚 Bilimsel Araştırma Yöntemleri dönem projesi kapsamında geliştirilmiştir.\n\n🚀 AI destekli görev yönetimi uygulaması\n💡 Görevlerinizi akıllıca yönetin!\n\nTaskMaster, kullanıcıların günlük görevlerini organize edebileceği, kategorilere ayırabileceği ve AI asistan desteği ile akıllı öneriler alabileceği modern bir mobil görev yönetim uygulamasıdır.\n\nTeknolojiler:\n• React Native (Expo)\n• FastAPI (Python)\n• PostgreSQL\n• JWT Authentication\n\n© 2025 TaskMaster'
             )}
           >
             <View style={styles.menuItemLeft}>
@@ -157,28 +150,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#0F0F1E',
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2C2C3E',
-  },
-  backButton: {
-    padding: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  placeholder: {
-    width: 40,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
   },
   title: {
-    fontSize: 20,
+    fontSize: 32,
     fontWeight: 'bold',
     color: '#FFFFFF',
-    flex: 1,
-    textAlign: 'center',
   },
   content: {
     flex: 1,

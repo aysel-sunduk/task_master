@@ -1,128 +1,111 @@
-import React, { useState, useRef, useEffect } from 'react';
+/**
+ * TaskMaster - AI Chatbot Sayfası
+ * =================================
+ * Bu ekran, kullanıcının görevlerine hakim olan bir AI asistan ile sohbet etmesini sağlar.
+ * OpenRouter API kullanarak görev yönetimi konusunda akıllı yardım sağlar.
+ */
+
+import { Ionicons } from '@expo/vector-icons';
+import axios from 'axios';
+import { useRouter } from 'expo-router';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
-  ActivityIndicator,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
-import axios from 'axios';
-
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000');
 
 interface Message {
-  role: 'user' | 'assistant';
-  content: string;
+  id: string;
+  text: string;
+  isUser: boolean;
+  timestamp: Date;
 }
 
 export default function ChatbotScreen() {
-  const router = useRouter();
   const { token } = useAuth();
+  const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([
     {
-      role: 'assistant',
-      content: 'Merhaba! TaskMaster asistanınızım. Görev yönetimi konusunda size nasıl yardımcı olabilirim?',
+      id: '1',
+      text: 'Merhaba! TaskMaster asistanınızım. Görevlerinizle ilgili sorularınızı sorabilir, öneriler alabilir ve görevlerinizi daha iyi yönetmenize yardımcı olabilirim. Nasıl yardımcı olabilirim?',
+      isUser: false,
+      timestamp: new Date(),
     },
   ]);
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(false);
   const scrollViewRef = useRef<ScrollView>(null);
 
+  // Yeni mesaj eklendiğinde en alta kaydır
   useEffect(() => {
-    // Yeni mesaj geldiğinde scroll yap
-    scrollViewRef.current?.scrollToEnd({ animated: true });
+    setTimeout(() => {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }, 100);
   }, [messages]);
 
-  const sendMessage = async () => {
-    if (!inputText.trim() || !token) return;
+  /**
+   * Mesaj gönderme fonksiyonu
+   */
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || loading) return;
+    if (!token) {
+      alert('Giriş yapmanız gerekiyor');
+      router.replace('/(auth)/login');
+      return;
+    }
 
-    const userMessage: Message = { role: 'user', content: inputText.trim() };
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      text: inputText.trim(),
+      isUser: true,
+      timestamp: new Date(),
+    };
+
+    // Kullanıcı mesajını ekle
     setMessages((prev) => [...prev, userMessage]);
     setInputText('');
     setLoading(true);
 
     try {
+      // Backend API'ye istek gönder
       const response = await axios.post(
-        `${API_URL}/api/ai/chat`,
-        {
-          messages: [...messages, userMessage].map((msg) => ({
-            role: msg.role,
-            content: msg.content,
-          })),
-        },
+        `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/ai/chat`,
+        { message: userMessage.text },
         {
           headers: { Authorization: `Bearer ${token}` },
         }
       );
 
+      // AI yanıtını ekle
       const aiMessage: Message = {
-        role: 'assistant',
-        content: response.data.message,
+        id: (Date.now() + 1).toString(),
+        text: response.data.response,
+        isUser: false,
+        timestamp: new Date(),
       };
+
       setMessages((prev) => [...prev, aiMessage]);
     } catch (error: any) {
-      console.error('Chat hatası:', error);
-      console.error('Chat hatası detayları:', {
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        data: error.response?.data,
-        message: error.message,
-        url: error.config?.url
-      });
+      console.error('AI chat hatası:', error);
       
-      let errorContent = 'Üzgünüm, bir hata oluştu. Lütfen tekrar deneyin.';
-      
-      if (error.response?.status === 429) {
-        errorContent = 'AI servisi şu anda çok yoğun. Lütfen birkaç saniye sonra tekrar deneyin.';
-      } else if (error.response?.status === 503) {
-        errorContent = 'AI servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin.';
-      } else if (error.response?.status === 504) {
-        errorContent = 'AI servisi yanıt vermedi. Lütfen tekrar deneyin.';
-      } else if (error.response?.data?.detail) {
-        errorContent = error.response.data.detail;
-      } else if (error.message) {
-        errorContent = `Hata: ${error.message}`;
-      }
-      
+      // Hata mesajı göster
       const errorMessage: Message = {
-        role: 'assistant',
-        content: errorContent,
+        id: (Date.now() + 1).toString(),
+        text: error.response?.data?.detail || 'Bir hata oluştu. Lütfen tekrar deneyin.',
+        isUser: false,
+        timestamp: new Date(),
       };
+      
       setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const getQuickSuggestions = async () => {
-    if (!token) return;
-
-    setLoading(true);
-    try {
-      const response = await axios.post(
-        `${API_URL}/api/ai/suggestions`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-
-      const suggestions = response.data;
-      if (suggestions && suggestions.length > 0) {
-        const suggestionText = suggestions.join('\n');
-        setInputText(suggestionText);
-      }
-    } catch (error: any) {
-      console.error('Öneriler alınırken hata:', error);
     } finally {
       setLoading(false);
     }
@@ -130,6 +113,7 @@ export default function ChatbotScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
@@ -138,46 +122,40 @@ export default function ChatbotScreen() {
           <Ionicons name="sparkles" size={24} color="#6C63FF" />
           <Text style={styles.headerTitle}>AI Asistan</Text>
         </View>
-        <TouchableOpacity onPress={getQuickSuggestions} style={styles.suggestButton}>
-          <Ionicons name="bulb-outline" size={24} color="#6C63FF" />
-        </TouchableOpacity>
+        <View style={{ width: 40 }} />
       </View>
 
+      {/* Messages */}
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.messagesContainer}
+        contentContainerStyle={styles.messagesContent}
+      >
+        {messages.map((message) => (
+          <View
+            key={message.id}
+            style={[
+              styles.messageBubble,
+              message.isUser ? styles.userMessage : styles.aiMessage,
+            ]}
+          >
+            <Text style={styles.messageText}>{message.text}</Text>
+          </View>
+        ))}
+        
+        {loading && (
+          <View style={[styles.messageBubble, styles.aiMessage]}>
+            <ActivityIndicator size="small" color="#6C63FF" />
+            <Text style={styles.messageText}>Yazıyor...</Text>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Input */}
       <KeyboardAvoidingView
-        style={styles.chatContainer}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={90}
       >
-        <ScrollView
-          ref={scrollViewRef}
-          style={styles.messagesContainer}
-          contentContainerStyle={styles.messagesContent}
-        >
-          {messages.map((message, index) => (
-            <View
-              key={index}
-              style={[
-                styles.messageBubble,
-                message.role === 'user' ? styles.userMessage : styles.assistantMessage,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.messageText,
-                  message.role === 'user' ? styles.userMessageText : styles.assistantMessageText,
-                ]}
-              >
-                {message.content}
-              </Text>
-            </View>
-          ))}
-          {loading && (
-            <View style={[styles.messageBubble, styles.assistantMessage]}>
-              <ActivityIndicator size="small" color="#6C63FF" />
-            </View>
-          )}
-        </ScrollView>
-
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
@@ -191,7 +169,7 @@ export default function ChatbotScreen() {
           />
           <TouchableOpacity
             style={[styles.sendButton, (!inputText.trim() || loading) && styles.sendButtonDisabled]}
-            onPress={sendMessage}
+            onPress={handleSendMessage}
             disabled={!inputText.trim() || loading}
           >
             <Ionicons name="send" size={20} color="#FFFFFF" />
@@ -229,12 +207,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#FFFFFF',
   },
-  suggestButton: {
-    padding: 8,
-  },
-  chatContainer: {
-    flex: 1,
-  },
   messagesContainer: {
     flex: 1,
   },
@@ -249,53 +221,47 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   userMessage: {
-    alignSelf: 'flex-end',
     backgroundColor: '#6C63FF',
+    alignSelf: 'flex-end',
     borderBottomRightRadius: 4,
   },
-  assistantMessage: {
-    alignSelf: 'flex-start',
+  aiMessage: {
     backgroundColor: '#1C1C2E',
+    alignSelf: 'flex-start',
     borderBottomLeftRadius: 4,
     borderWidth: 1,
     borderColor: '#2C2C3E',
   },
   messageText: {
-    fontSize: 15,
-    lineHeight: 20,
-  },
-  userMessageText: {
+    fontSize: 16,
     color: '#FFFFFF',
-  },
-  assistantMessageText: {
-    color: '#FFFFFF',
+    lineHeight: 22,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     paddingHorizontal: 16,
     paddingVertical: 12,
+    backgroundColor: '#1C1C2E',
     borderTopWidth: 1,
     borderTopColor: '#2C2C3E',
-    backgroundColor: '#0F0F1E',
+    gap: 12,
   },
   input: {
     flex: 1,
-    backgroundColor: '#1C1C2E',
-    color: '#FFFFFF',
+    backgroundColor: '#2C2C3E',
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
+    color: '#FFFFFF',
+    fontSize: 16,
     maxHeight: 100,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: '#2C2C3E',
-    marginRight: 8,
+    minHeight: 40,
   },
   sendButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#6C63FF',
     justifyContent: 'center',
     alignItems: 'center',
@@ -304,4 +270,3 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
 });
-

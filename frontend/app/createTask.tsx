@@ -1,87 +1,120 @@
-import React, { useState, useEffect } from 'react';
+/**
+ * TaskMaster - Görev Oluşturma/Düzenleme Ekranı
+ * ==============================================
+ * Bu ekran, yeni görev oluşturma veya mevcut görevi düzenleme işlemlerini yapar.
+ * 
+ * Özellikler:
+ * - Görev başlığı ve açıklama girişi
+ * - Kategori seçimi (dropdown)
+ * - Öncelik seviyesi seçimi
+ * - Durum seçimi
+ * - İlerleme yüzdesi ayarlama
+ * - Etiket ekleme
+ * - Resim ekleme (galeri)
+ * - Form validasyonu
+ */
+
+import { Ionicons } from '@expo/vector-icons'; // İkonlar
+import axios from 'axios'; // HTTP istekleri
+import * as ImagePicker from 'expo-image-picker'; // Resim seçme
+import { useLocalSearchParams, useRouter } from 'expo-router'; // Navigasyon
+import React, { useEffect, useState } from 'react';
 import {
-  View,
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  StyleSheet,
-  Alert,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
-  Image,
-  ActivityIndicator,
+  View,
 } from 'react-native';
-import axios from 'axios';
-import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useAuth } from '../contexts/AuthContext';
-import { useTaskStore } from '../store/taskStore';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import RNPickerSelect from 'react-native-picker-select';
-import { Ionicons } from '@expo/vector-icons';
-import * as ImagePicker from 'expo-image-picker';
+import RNPickerSelect from 'react-native-picker-select'; // Dropdown picker
+import { useAuth } from '../contexts/AuthContext'; // Authentication
 
+// ========== TYPE DEFINITIONS ==========
+
+/**
+ * Kategori interface
+ */
 interface Category {
-  id: string;
-  name: string;
-  color: string;
-  icon: string;
+  id: string;  // Kategori ID'si
+  name: string;  // Kategori adı
+  color: string;  // Kategori rengi
+  icon: string;  // Kategori ikonu
 }
 
+// ========== CONSTANTS ==========
+// Öncelik seviyeleri
 const PRIORITIES = ['Düşük', 'Orta', 'Yüksek', 'Acil'];
+// Görev durumları
 const STATUSES = ['Yapılacak', 'Devam Ediyor', 'Tamamlandı'];
+// İlerleme yüzdesi seçenekleri
 const PERCENTAGES = [0, 25, 50, 75, 100];
 
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000');
-
+/**
+ * CreateTaskScreen Component
+ * ===========================
+ * Görev oluşturma/düzenleme formu
+ */
 export default function CreateTaskScreen() {
-  const { token } = useAuth();
-  const router = useRouter();
-  const params = useLocalSearchParams();
+  // ========== HOOKS ==========
+  const { token } = useAuth();  // JWT token
+  const router = useRouter();  // Navigasyon
+  const params = useLocalSearchParams();  // URL parametreleri
 
-  const taskIdParam = params.taskId;
-  const taskId = Array.isArray(taskIdParam) ? taskIdParam[0] : taskIdParam;
-  const isEditMode = !!taskId;
-
+  // ========== INITIAL VALUES ==========
+  // URL'den gelen ön doldurulmuş başlık (AI önerilerinden gelebilir)
   const initialTitleParam = params.prefillTitle;
   const initialTitle = Array.isArray(initialTitleParam)
     ? initialTitleParam[0] || ''
     : initialTitleParam || '';
 
-  const [title, setTitle] = useState<string>(initialTitle);
-  const [description, setDescription] = useState('');
-  const [categoryId, setCategoryId] = useState<string | null>(null);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [tags, setTags] = useState('');
-  const [priority, setPriority] = useState('Orta');
-  const [status, setStatus] = useState('Yapılacak');
-  const [completionPercentage, setCompletionPercentage] = useState(0);
-  const [images, setImages] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadingTask, setLoadingTask] = useState(false);
+  // ========== STATE HOOKS ==========
+  const [title, setTitle] = useState<string>(initialTitle);  // Görev başlığı
+  const [description, setDescription] = useState('');  // Görev açıklaması
+  const [categoryId, setCategoryId] = useState<string | null>(null);  // Seçili kategori ID'si
+  const [categories, setCategories] = useState<Category[]>([]);  // Kategoriler listesi
+  const [tags, setTags] = useState('');  // Etiketler (virgülle ayrılmış string)
+  const [priority, setPriority] = useState('Orta');  // Öncelik seviyesi
+  const [status, setStatus] = useState('Yapılacak');  // Görev durumu
+  const [completionPercentage, setCompletionPercentage] = useState(0);  // Tamamlanma yüzdesi
+  const [images, setImages] = useState<string[]>([]);  // Resimler (base64 array)
+  const [loading, setLoading] = useState(false);  // Form gönderme durumu
 
+  // ========== EFFECT: KATEGORİLERİ YÜKLE ==========
+  // Component mount olduğunda kategorileri backend'den yükle
   useEffect(() => {
     const fetchCategories = async () => {
-      if (!token) return;
+      if (!token) return;  // Token yoksa işlem yapma
+      
       try {
+        // Backend'den kategorileri getir
         const response = await axios.get(
-          `${API_URL}/api/categories`,
+          `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/categories`,
           {
-            headers: { Authorization: `Bearer ${token}` },
+            headers: { Authorization: `Bearer ${token}` },  // JWT token header'a ekle
           }
         );
-        setCategories(response.data);
+        
+        setCategories(response.data);  // Kategorileri state'e kaydet
+        console.log('Fetched Categories:', response.data);
 
+        // Varsayılan kategoriyi seç (Genel varsa onu, yoksa ilk kategoriyi)
         const defaultCategory = response.data.find((cat: Category) => cat.name === 'Genel');
-        if (defaultCategory && !isEditMode) {
+        if (defaultCategory) {
           setCategoryId(defaultCategory.id);
-        } else if (response.data.length > 0 && !isEditMode) {
+          console.log('Default category set to Genel:', defaultCategory.id);
+        } else if (response.data.length > 0) {
           setCategoryId(response.data[0].id);
+          console.log('Default category set to first available:', response.data[0].id);
         }
       } catch (error: any) {
         console.error('Kategoriler alınırken hata oluştu:', error);
-        // 401 hatası - Token geçersiz
+        
+        // 401 hatası - Token geçersiz veya süresi dolmuş
         if (error.response?.status === 401) {
           Alert.alert(
             'Oturum Süresi Doldu',
@@ -90,159 +123,141 @@ export default function CreateTaskScreen() {
               {
                 text: 'Tamam',
                 onPress: () => {
-                  // Logout yap ve login sayfasına yönlendir
+                  // Login sayfasına yönlendir
                   router.replace('/(auth)/login');
                 },
               },
             ]
           );
         } else {
+          // Diğer hatalar
           Alert.alert('Hata', error.response?.data?.detail || 'Kategoriler yüklenemedi.');
         }
       }
     };
     fetchCategories();
-  }, [token, isEditMode]);
+  }, [token]);  // Token değiştiğinde tekrar çalış
 
-  useEffect(() => {
-    const fetchTask = async () => {
-      if (!taskId || !token || !isEditMode) return;
-      
-      setLoadingTask(true);
-      try {
-        const response = await axios.get(
-          `${API_URL}/api/tasks/${taskId}`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
-        const task = response.data;
-        
-        setTitle(task.title || '');
-        setDescription(task.description || '');
-        setCategoryId(task.category_id || null);
-        setTags(task.tags?.join(', ') || '');
-        setPriority(task.priority || 'Orta');
-        setStatus(task.status || 'Yapılacak');
-        setCompletionPercentage(task.completion_percentage || 0);
-        setImages(task.images || []);
-      } catch (error: any) {
-        console.error('Görev yüklenirken hata oluştu:', error);
-        Alert.alert('Hata', error.response?.data?.detail || 'Görev yüklenemedi');
-        router.back();
-      } finally {
-        setLoadingTask(false);
-      }
-    };
-    
-    fetchTask();
-  }, [taskId, token, isEditMode]);
-
+  // ========== RESİM İŞLEMLERİ ==========
+  
+  /**
+   * Galeriden resim seçme fonksiyonu
+   * Kullanıcıdan galeri erişim izni ister, resim seçer ve base64 formatında kaydeder
+   */
   const handlePickImage = async () => {
+    // Galeri erişim izni iste
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
       Alert.alert('İzin Gerekli', 'Galeri erişimi için izin vermeniz gerekiyor');
       return;
     }
+    
+    // Resim seçiciyi aç
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      quality: 0.5,
-      base64: true,
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,  // Sadece resimler
+      allowsEditing: true,  // Düzenlemeye izin ver
+      quality: 0.5,  // Kalite (0-1 arası, 0.5 = %50 kalite - dosya boyutu için)
+      base64: true,  // Base64 formatında al (backend'e göndermek için)
     });
 
+    // Kullanıcı resim seçtiyse ve base64 verisi varsa, state'e ekle
     if (!result.canceled && result.assets && result.assets[0].base64) {
       setImages([...images, `data:image/jpeg;base64,${result.assets[0].base64}`]);
     }
   };
 
+  /**
+   * Resim silme fonksiyonu
+   * @param index - Silinecek resmin index'i
+   */
   const handleRemoveImage = (index: number) => {
     setImages(images.filter((_: string, i: number) => i !== index));
   };
 
+  // ========== GÖREV OLUŞTURMA FONKSİYONU ==========
+  /**
+   * Form gönderme fonksiyonu
+   * Form verilerini backend'e gönderir ve yeni görev oluşturur
+   */
   const handleCreateTask = async () => {
+    // ========== VALİDASYON ==========
+    // Başlık ve kategori zorunlu alanlar
     if (!title || !categoryId) {
       Alert.alert('Hata', 'Başlık ve Kategori alanları zorunludur');
       return;
     }
+    
+    // Token kontrolü
     if (!token) {
       Alert.alert('Hata', 'Giriş yapılmamış. Lütfen tekrar giriş yapın.');
       return;
     }
 
-    setLoading(true);
+    setLoading(true);  // Yükleme durumunu başlat
+    
     try {
+      // ========== VERİ HAZIRLAMA ==========
+      // Backend'e gönderilecek veriyi hazırla
       const taskData = {
-        title: title.trim(),
-        description: description.trim(),
-        category_id: categoryId,
-        tags: tags.split(',').map((t: string) => t.trim()).filter((t: string) => t),
-        priority,
-        status,
-        completion_percentage: completionPercentage,
-        images,
-        due_date: null,
+        title: title.trim(),  // Başlıktaki boşlukları temizle
+        description: description.trim(),  // Açıklamadaki boşlukları temizle
+        category_id: categoryId,  // Seçili kategori ID'si
+        tags: tags.split(',').map((t: string) => t.trim()).filter((t: string) => t),  // Virgülle ayrılmış etiketleri array'e çevir
+        priority,  // Öncelik seviyesi
+        status,  // Görev durumu
+        completion_percentage: completionPercentage,  // Tamamlanma yüzdesi
+        images,  // Resimler (base64 array)
+        due_date: null,  // Son tarih (şimdilik null)
       };
 
-      if (isEditMode && taskId) {
-        // Güncelleme modu - taskStore kullan
-        const { updateTask } = useTaskStore.getState();
-        await updateTask(token, taskId, taskData);
-        Alert.alert('Başarılı', 'Görev başarıyla güncellendi');
-      } else {
-        // Oluşturma modu - taskStore kullan
-        const { createTask: createTaskInStore } = useTaskStore.getState();
-        await createTaskInStore(token, taskData);
-      Alert.alert('Başarılı', 'Görev başarıyla oluşturuldu');
-      }
+      console.log('--- Sending Task Data ---');
+      console.log('Title:', taskData.title);
+      console.log('Sending categoryId:', taskData.category_id);
+      console.log('-------------------------');
 
-      router.push('/(tabs)/home');
+      // ========== BACKEND İSTEĞİ ==========
+      // Backend API'ye POST isteği gönder
+      await axios.post(
+        `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/tasks`,
+        taskData,
+        {
+          headers: { Authorization: `Bearer ${token}` },  // JWT token header'a ekle
+        }
+      );
+
+      // ========== BAŞARI DURUMU ==========
+      Alert.alert('Başarılı', 'Görev başarıyla oluşturuldu');
+      router.push('/(tabs)/home');  // Ana sayfaya dön
 
     } catch (error: any) {
-      console.error('Görev işlemi sırasında hata oluştu:', error.response?.data || error);
-      const errorMessage = error.response?.data?.detail || 
-        (isEditMode ? 'Görev güncellenemedi' : 'Görev oluşturulamadı');
-      Alert.alert('Hata', errorMessage);
+      // ========== HATA DURUMU ==========
+      console.error('Görev oluşturulurken hata oluştu:', error.response?.data || error);
+      Alert.alert('Hata', error.response?.data?.detail || 'Görev oluşturulamadı');
     } finally {
-      setLoading(false);
+      setLoading(false);  // Yükleme durumunu bitir (her durumda)
     }
   };
 
-  // Bu kısım doğru görünüyor, label=isim, value=id eşleşmesi yapılıyor.
+  // ========== PICKER ITEMS HAZIRLAMA ==========
+  // Dropdown picker için kategori listesini hazırla
+  // label: Görünen isim, value: Seçildiğinde dönen ID
   const pickerItems = categories.map((cat) => ({
-    label: cat.name,
-    value: cat.id,
+    label: cat.name,  // Kategori adı (görünen)
+    value: cat.id,  // Kategori ID'si (seçildiğinde dönen değer)
   }));
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <TouchableOpacity 
-          onPress={() => router.back()} 
-          style={styles.backButton}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>{isEditMode ? 'Görevi Düzenle' : 'Yeni Görev'}</Text>
-        <View style={styles.placeholder} />
-      </View>
     <KeyboardAvoidingView
-        style={styles.keyboardView}
+      style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
     >
-        <ScrollView 
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-        >
-
-        {loadingTask && (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#6C63FF" />
-            <Text style={styles.loadingText}>Görev yükleniyor...</Text>
-          </View>
-        )}
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Yeni Görev</Text>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="close" size={28} color="#FFFFFF" />
+          </TouchableOpacity>
+        </View>
 
         <Text style={styles.label}>Başlık *</Text>
         <TextInput
@@ -360,16 +375,10 @@ export default function CreateTaskScreen() {
           onPress={handleCreateTask}
           disabled={loading}
         >
-          <Text style={styles.saveButtonText}>
-            {loading 
-              ? (isEditMode ? 'Güncelleniyor...' : 'Kaydediliyor...') 
-              : (isEditMode ? 'Güncelle' : 'Kaydet')
-            }
-          </Text>
+          <Text style={styles.saveButtonText}>{loading ? 'Kaydediliyor...' : 'Kaydet'}</Text>
         </TouchableOpacity>
       </ScrollView>
     </KeyboardAvoidingView>
-    </SafeAreaView>
   );
 }
 
@@ -379,36 +388,20 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0F0F1E',
   },
-  keyboardView: {
-    flex: 1,
-  },
   scrollContent: {
     padding: 24,
     paddingBottom: 60,
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2C2C3E',
-  },
-  backButton: {
-    padding: 8,
-    justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 24,
   },
-  headerTitle: {
-    fontSize: 20,
+  title: {
+    fontSize: 28,
     fontWeight: 'bold',
     color: '#FFFFFF',
-    flex: 1,
-    textAlign: 'center',
-  },
-  placeholder: {
-    width: 40,
   },
   label: {
     fontSize: 16,
@@ -511,16 +504,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '600',
-  },
-  loadingContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 40,
-  },
-  loadingText: {
-    marginTop: 12,
-    color: '#8E8E93',
-    fontSize: 14,
   },
 });
 

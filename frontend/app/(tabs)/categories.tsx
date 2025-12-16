@@ -90,17 +90,8 @@ export default function CategoriesScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity 
-          onPress={() => router.back()} 
-          style={styles.backButton}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
-        <View style={styles.headerContent}>
-          <Text style={styles.title}>Kategoriler</Text>
-          <Text style={styles.subtitle}>{categories.length} kategori</Text>
-        </View>
+        <Text style={styles.title}>Kategoriler</Text>
+        <Text style={styles.subtitle}>{categories?.length || 0} kategori</Text>
       </View>
 
       <ScrollView
@@ -138,12 +129,20 @@ export default function CategoriesScreen() {
                   </View>
                   <Text style={styles.categoryName}>{category.name}</Text>
                   <View style={styles.categoryStats}>
-                    <View style={styles.statItem}><Ionicons name="list" size={16} color="#8E8E93" /><Text style={styles.statText}>{category.count} görev</Text></View>
-                    <View style={styles.statItem}><Ionicons name="checkmark-circle" size={16} color="#4CAF50" /><Text style={styles.statText}>{category.completed} tamamlandı</Text></View>
+                    <View style={styles.statItem}>
+                      <Ionicons name="list" size={16} color="#8E8E93" />
+                      <Text style={styles.statText}>{category.count || 0} görev</Text>
+                    </View>
+                    <View style={styles.statItem}>
+                      <Ionicons name="checkmark-circle" size={16} color="#4CAF50" />
+                      <Text style={styles.statText}>{category.completed || 0} tamamlandı</Text>
+                    </View>
                   </View>
                   <View style={styles.progressContainer}>
-                    <View style={styles.progressBar}><View style={[ styles.progressFill, { width: `${completionRate}%`, backgroundColor: getCategoryColor(index) }]} /></View>
-                    <Text style={styles.progressText}>{completionRate}%</Text>
+                    <View style={styles.progressBar}>
+                      <View style={[ styles.progressFill, { width: `${completionRate || 0}%`, backgroundColor: getCategoryColor(index) }]} />
+                    </View>
+                    <Text style={styles.progressText}>{completionRate || 0}%</Text>
                   </View>
                 </TouchableOpacity>
               );
@@ -158,20 +157,7 @@ export default function CategoriesScreen() {
 // Stiller güncellendi (loading için)
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F0F1E' },
-  header: { 
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 24, 
-    paddingVertical: 16,
-    gap: 16,
-  },
-  backButton: {
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerContent: {
-    flex: 1,
-  },
+  header: { paddingHorizontal: 24, paddingVertical: 16 },
   title: { fontSize: 32, fontWeight: 'bold', color: '#FFFFFF' },
   subtitle: { fontSize: 14, color: '#8E8E93', marginTop: 4 },
   content: { flex: 1, paddingHorizontal: 24 },

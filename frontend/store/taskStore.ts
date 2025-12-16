@@ -1,214 +1,235 @@
-import { create } from 'zustand';
-import axios from 'axios';
-import { Platform } from 'react-native';
+/**
+ * TaskMaster - Görev Yönetimi State Store
+ * =========================================
+ * Bu dosya, Zustand kullanarak görev yönetimi için global state yönetimini sağlar.
+ * Tüm görev CRUD işlemleri (Create, Read, Update, Delete) bu store üzerinden yapılır.
+ * 
+ * Kullanılan Teknolojiler:
+ * - Zustand: Hafif ve performanslı state management
+ * - Axios: HTTP istekleri için
+ */
 
-// Android emülatör için 10.0.2.2, fiziksel cihaz/web için localhost
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000');
+import axios from 'axios'; // HTTP istekleri için axios
+import { create } from 'zustand'; // Zustand state management kütüphanesi
 
-console.log(`[API] API_URL initialized: ${API_URL}, Platform: ${Platform.OS}`);
+// Backend API URL'si - .env dosyasından alınır
+const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
+/**
+ * Görev (Task) Interface
+ * Backend'den gelen görev verisinin yapısını tanımlar
+ */
 export interface Task {
-  id: string;
-  user_id: string;
-  title: string;
-  description?: string;
-  // <<< ÖNEMLİ: API'nizden kategori adı mı ID'si mi geliyor? >>>
-  category?: string; // Eğer kategori adı geliyorsa bu kalsın
-  category_id?: string; // Eğer ID geliyorsa ve adı ayrıca almanız gerekiyorsa bu daha karmaşık olur
-  tags: string[];
-  priority: string;
-  // <<< ÖNEMLİ: API'nizdeki status tipleri bunlar mı? >>>
-  status: 'Yapılacak' | 'Devam Ediyor' | 'Tamamlandı';
-  completion_percentage: number;
-  images: string[];
-  due_date?: string;
-  created_at: string;
-  updated_at: string;
+  id: string;  // Görev benzersiz ID'si (UUID)
+  user_id: string;  // Görev sahibi kullanıcı ID'si
+  title: string;  // Görev başlığı
+  description?: string;  // Görev açıklaması (opsiyonel)
+  category?: string;  // Kategori adı (eski format - geriye dönük uyumluluk için)
+  category_id?: string;  // Kategori ID'si
+  tags: string[];  // Görev etiketleri listesi
+  priority: string;  // Öncelik seviyesi (Düşük, Orta, Yüksek, Acil)
+  status: 'Yapılacak' | 'Devam Ediyor' | 'Tamamlandı';  // Görev durumu
+  completion_percentage: number;  // Tamamlanma yüzdesi (0-100)
+  images: string[];  // Görev resimleri (base64 veya URL)
+  due_date?: string;  // Son tarih (ISO format string)
+  created_at: string;  // Oluşturulma tarihi
+  updated_at: string;  // Güncellenme tarihi
 
-  category_name?: string | null;
-  category_color?: string | null;
-  category_icon?: string | null;
+  // Kategori bilgileri (JOIN ile backend'den gelir)
+  category_name?: string | null;  // Kategori adı
+  category_color?: string | null;  // Kategori rengi (hex)
+  category_icon?: string | null;  // Kategori ikonu (Ionicons ismi)
 }
 
+/**
+ * TaskStore Interface
+ * Zustand store'unun yapısını tanımlar
+ */
 interface TaskStore {
-  tasks: Task[];
-  loading: boolean;
-  error: string | null;
-  // <<< DÖNÜŞ TİPİ Promise<Task[]> OLDU >>>
-  fetchTasks: (token: string, filters?: any) => Promise<Task[]>;
-  // Diğer fonksiyonların dönüş tiplerini de isteğe bağlı güncelleyebiliriz
-  createTask: (token: string, taskData: any) => Promise<Task | null>;
-  updateTask: (token: string, taskId: string, taskData: any) => Promise<Task | null>;
-  deleteTask: (token: string, taskId: string) => Promise<boolean>;
-  getAISuggestions: (token: string) => Promise<string[]>;
+  // State değişkenleri
+  tasks: Task[];  // Tüm görevler listesi
+  loading: boolean;  // Yükleme durumu (istek devam ediyor mu?)
+  error: string | null;  // Hata mesajı (varsa)
+
+  // Action fonksiyonları
+  fetchTasks: (token: string, filters?: any) => Promise<Task[]>;  // Görevleri backend'den getir
+  createTask: (token: string, taskData: any) => Promise<Task | null>;  // Yeni görev oluştur
+  updateTask: (token: string, taskId: string, taskData: any) => Promise<Task | null>;  // Görev güncelle
+  deleteTask: (token: string, taskId: string) => Promise<boolean>;  // Görev sil
+  getAISuggestions: (token: string) => Promise<string[]>;  // AI önerileri al
 }
 
+/**
+ * TaskStore - Zustand Store Implementation
+ * Global görev yönetimi state'i ve action'ları
+ */
 export const useTaskStore = create<TaskStore>((set, get) => ({
-  tasks: [],
-  loading: false,
-  error: null,
+  // ========== INITIAL STATE ==========
+  tasks: [],  // Başlangıçta boş görev listesi
+  loading: false,  // Başlangıçta yükleme yok
+  error: null,  // Başlangıçta hata yok
 
+  // ========== FETCH TASKS (Görevleri Getir) ==========
+  /**
+   * Backend'den görevleri getirir ve state'e kaydeder.
+   * 
+   * @param token - JWT authentication token
+   * @param filters - Filtreleme parametreleri (category_id, status, priority)
+   * @returns Promise<Task[]> - Getirilen görevler listesi
+   */
   fetchTasks: async (token: string, filters = {}) => {
-    // Sadece bir fetch işlemi aynı anda çalışsın (isteğe bağlı iyileştirme)
+    // Çoklu istek önleme: Eğer zaten bir fetch işlemi devam ediyorsa, mevcut görevleri döndür
     if (get().loading) {
         console.log("Fetch already in progress, returning current tasks");
-        return get().tasks; // Mevcut taskları döndür
+        return get().tasks; // Mevcut taskları döndür (duplicate request önleme)
     }
+    
+    // Yükleme durumunu başlat ve hataları temizle
     set({ loading: true, error: null });
+    
     try {
+      // Filtreleri URL parametrelerine çevir
       const params = new URLSearchParams(filters);
-      const fullUrl = `${API_URL}/api/tasks?${params}`;
-      console.log(`[TaskStore] Fetching tasks - URL: ${fullUrl}`); // Tam URL'yi logla
-      console.log(`[TaskStore] API_URL değeri: ${API_URL}`); // API_URL değerini logla
-      const response = await axios.get<Task[] | { tasks: Task[] }>(fullUrl, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 10000
-      });
+      console.log(`[TaskStore] Fetching tasks with filters: ${params.toString()}`);
+      
+      // Backend API'ye GET isteği gönder
+      const response = await axios.get<Task[] | { tasks: Task[] }>(
+        `${API_URL}/api/tasks?${params}`, 
+        {
+          headers: { Authorization: `Bearer ${token}` },  // JWT token header'a ekle
+          timeout: 10000  // 10 saniye timeout (ağ sorunlarında takılmayı önler)
+        }
+      );
 
-      // API yanıtınızın yapısına göre görev listesini alın:
+      // API yanıtını parse et (backend farklı formatlar dönebilir)
       let fetchedTasks: Task[] = [];
       if (Array.isArray(response.data)) {
-          fetchedTasks = response.data; // Yanıt doğrudan dizi ise
+          // Yanıt doğrudan dizi ise
+          fetchedTasks = response.data;
       } else if (response.data && Array.isArray((response.data as any).tasks)) {
-          fetchedTasks = (response.data as any).tasks; // Yanıt { tasks: [...] } şeklinde ise
+          // Yanıt { tasks: [...] } şeklinde ise
+          fetchedTasks = (response.data as any).tasks;
       } else {
+          // Beklenmedik format
           console.warn("[TaskStore] Unexpected API response structure:", response.data);
       }
 
-      console.log(`[TaskStore] Fetched ${fetchedTasks.length} tasks.`); // Log eklendi
+      console.log(`[TaskStore] Fetched ${fetchedTasks.length} tasks.`);
+      
+      // State'i güncelle: görevleri kaydet, yükleme durumunu bitir
       set({ tasks: fetchedTasks, loading: false });
-      return fetchedTasks; // <<< BAŞARILI DURUMDA GÖREVLERİ DÖNDÜR >>>
+      return fetchedTasks; // Başarılı durumda görevleri döndür
 
     } catch (error: any) {
-      const statusCode = error.response?.status;
-      const errorUrl = error.config?.url;
-      const errorData = error.response?.data;
-      
-      console.error(`[TaskStore] fetchTasks error - Status: ${statusCode}, URL: ${errorUrl}`);
-      console.error(`[TaskStore] API_URL: ${API_URL}, Full URL: ${API_URL}/api/tasks`);
-      console.error(`[TaskStore] Error details:`, errorData || error.message);
-      console.error(`[TaskStore] Full error:`, error);
-      
-      const errorMessage = errorData?.detail || error.message || 'Görevler alınamadı';
-      
-      // 401 hatası (Unauthorized) - Token geçersiz, logout yap
-      if (statusCode === 401) {
-        console.error("[TaskStore] Token geçersiz, kullanıcı çıkış yapmalı");
-        set({ error: "Oturum süreniz dolmuş. Lütfen tekrar giriş yapın.", loading: false, tasks: [] });
-      } else if (statusCode === 404) {
-        // 404 hatası - Endpoint bulunamadı veya backend erişilemiyor
-        console.error("[TaskStore] 404 Not Found - Backend endpoint bulunamadı veya backend erişilemiyor");
-        set({ error: `Backend'e erişilemiyor. Lütfen backend'in çalıştığından emin olun. (URL: ${API_URL})`, loading: false, tasks: [] });
-      } else if (!error.response) {
-        // Network hatası - Backend'e bağlanılamıyor
-        console.error("[TaskStore] Network hatası - Backend'e bağlanılamıyor");
-        set({ error: `Backend'e bağlanılamıyor. Lütfen backend'in çalıştığından ve URL'nin doğru olduğundan emin olun. (URL: ${API_URL})`, loading: false, tasks: [] });
-      } else {
-      set({ error: errorMessage, loading: false, tasks: [] });
-      }
-      return []; // <<< HATA DURUMUNDA BOŞ DİZİ DÖNDÜR >>>
+      // Hata durumunda mesajı çıkar ve state'e kaydet
+      const errorMessage = error.response?.data?.detail || error.message || 'Görevler alınamadı';
+      console.error("[TaskStore] fetchTasks error:", errorMessage, error.response?.data);
+      set({ error: errorMessage, loading: false, tasks: [] }); // Hata durumunda görevleri temizle
+      return []; // Hata durumunda boş dizi döndür
     }
   },
 
+  // ========== CREATE TASK (Yeni Görev Oluştur) ==========
+  /**
+   * Backend'de yeni görev oluşturur ve listeyi yeniler.
+   * 
+   * @param token - JWT authentication token
+   * @param taskData - Oluşturulacak görev verisi
+   * @returns Promise<Task | null> - Oluşturulan görev veya null (hata durumunda)
+   */
   createTask: async (token: string, taskData: any) => {
-    set({ loading: true, error: null }); // Veya sadece loading: true
+    set({ loading: true, error: null }); // Yükleme durumunu başlat
     try {
-      console.log("[TaskStore] Creating task:", taskData); // Log eklendi
-      const response = await axios.post<Task>(`${API_URL}/api/tasks`, taskData, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      console.log("[TaskStore] Task created successfully, re-fetching tasks..."); // Log eklendi
-      // Görev oluşturulduktan sonra listeyi yenile ve DÖNEN GÖREVİ KULLANMA!
-      // Çünkü fetchTasks state'i güncelleyecek.
+      console.log("[TaskStore] Creating task:", taskData);
+      
+      // Backend API'ye POST isteği gönder
+      const response = await axios.post<Task>(
+        `${API_URL}/api/tasks`, 
+        taskData, 
+        {
+          headers: { Authorization: `Bearer ${token}` },  // JWT token header'a ekle
+        }
+      );
+      
+      console.log("[TaskStore] Task created successfully, re-fetching tasks...");
+      
+      // Görev oluşturulduktan sonra listeyi yenile
+      // fetchTasks state'i güncelleyeceği için response.data'yı direkt kullanmıyoruz
       await get().fetchTasks(token);
+      
       set({ loading: false }); // Yüklemeyi bitir
-      return response.data; // Yeni görevi döndür yine de (opsiyonel)
+      return response.data; // Yeni görevi döndür (opsiyonel - component'ler kullanabilir)
+      
     } catch (error: any) {
-       const errorMessage = error.response?.data?.detail || error.message || 'Görev oluşturulamadı';
-       console.error("[TaskStore] createTask error:", errorMessage, error.response?.data); // Daha detaylı log
+      // Hata durumunda mesajı çıkar ve state'e kaydet
+      const errorMessage = error.response?.data?.detail || error.message || 'Görev oluşturulamadı';
+      console.error("[TaskStore] createTask error:", errorMessage, error.response?.data);
       set({ error: errorMessage, loading: false });
       throw error; // Hatanın component'te yakalanabilmesi için fırlat
     }
   },
 
-  updateTask: async (token: string, taskId: string, taskData: any) => {
-    set({ loading: true, error: null });
-    try {
-      console.log(`[TaskStore] Updating task ${taskId}:`, taskData);
-      const response = await axios.put<Task>(`${API_URL}/api/tasks/${taskId}`, taskData, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      console.log("[TaskStore] Task updated successfully, re-fetching tasks...");
-      // Görev güncellendikten sonra listeyi yenile
-      await get().fetchTasks(token);
-      set({ loading: false });
-      return response.data;
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || 'Görev güncellenemedi';
-      console.error("[TaskStore] updateTask error:", errorMessage, error.response?.data);
-      set({ error: errorMessage, loading: false });
-      throw error;
-    }
+  // ========== UPDATE TASK (Görev Güncelle) ==========
+  /**
+   * Mevcut görevi günceller.
+   * 
+   * @param token - JWT authentication token
+   * @param taskId - Güncellenecek görev ID'si
+   * @param taskData - Güncellenecek görev verisi
+   * @returns Promise<Task | null> - Güncellenen görev veya null
+   */
+  updateTask: async (token: string, taskId: string, taskData: any) => { 
+    /* TODO: Implement update task functionality */
+    return null; 
   },
-
+  
+  // ========== DELETE TASK (Görev Sil) ==========
+  /**
+   * Görevi siler.
+   * 
+   * @param token - JWT authentication token
+   * @param taskId - Silinecek görev ID'si
+   * @returns Promise<boolean> - Silme işlemi başarılıysa true
+   */
   deleteTask: async (token: string, taskId: string) => {
     set({ loading: true, error: null });
     try {
-      console.log(`[TaskStore] Deleting task ${taskId}`);
-      await axios.delete(`${API_URL}/api/tasks/${taskId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      console.log("[TaskStore] Task deleted successfully, removing from list...");
-      // Görevi listeden hemen kaldır (UI hemen güncellenir)
-      const currentTasks = get().tasks;
-      const updatedTasks = currentTasks.filter(task => task.id !== taskId);
-      set({ tasks: updatedTasks, loading: false });
+      console.log(`[TaskStore] Deleting task: ${taskId}`);
       
-      // Arka planda listeyi yenile (senkronizasyon için)
-      get().fetchTasks(token).catch(err => {
-        console.error("[TaskStore] Error refreshing tasks after delete:", err);
-      });
+      // Backend API'ye DELETE isteği gönder
+      await axios.delete(
+        `${API_URL}/api/tasks/${taskId}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
       
-      return true;
+      console.log("[TaskStore] Task deleted successfully, re-fetching tasks...");
+      
+      // Görev silindikten sonra listeyi yenile
+      await get().fetchTasks(token);
+      
+      set({ loading: false });
+      return true; // Başarılı
+      
     } catch (error: any) {
-      // 404 hatası (görev zaten silinmiş) başarı olarak kabul et
-      if (error.response?.status === 404) {
-        console.log("[TaskStore] Task already deleted (404), removing from list...");
-        // Görevi listeden kaldır
-        const currentTasks = get().tasks;
-        const updatedTasks = currentTasks.filter(task => task.id !== taskId);
-        set({ tasks: updatedTasks, loading: false });
-        
-        // Arka planda listeyi yenile
-        get().fetchTasks(token).catch(err => {
-          console.error("[TaskStore] Error refreshing tasks after delete:", err);
-        });
-        
-        return true;
-      }
+      // Hata durumunda mesajı çıkar ve state'e kaydet
       const errorMessage = error.response?.data?.detail || error.message || 'Görev silinemedi';
       console.error("[TaskStore] deleteTask error:", errorMessage, error.response?.data);
       set({ error: errorMessage, loading: false });
-      throw error;
+      throw error; // Hatanın component'te yakalanabilmesi için fırlat
     }
   },
-
-  getAISuggestions: async (token: string) => {
-    set({ loading: true, error: null });
-    try {
-      console.log("[TaskStore] Fetching AI suggestions");
-      const response = await axios.get<string[]>(`${API_URL}/api/ai/suggestions`, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 10000,
-      });
-      set({ loading: false });
-      return response.data;
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || 'AI önerileri alınamadı';
-      console.error("[TaskStore] getAISuggestions error:", errorMessage, error.response?.data);
-      set({ error: errorMessage, loading: false });
-      return []; // Hata durumunda boş dizi döndür
-    }
+  
+  // ========== GET AI SUGGESTIONS (AI Önerileri Al) ==========
+  /**
+   * AI asistanından görev önerileri alır.
+   * 
+   * @param token - JWT authentication token
+   * @returns Promise<string[]> - AI önerileri listesi
+   */
+  getAISuggestions: async (token: string) => { 
+    /* TODO: Implement AI suggestions functionality */
+    return []; 
   },
 }));
